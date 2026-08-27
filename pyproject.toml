@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "osm-polygon-wikidata-website-coverage"
+version = "0.1.0"
+description = "Coverage statistics for raw OSM polygons and text-backed datasets."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Noe Flandre" }]
+dependencies = [
+    "duckdb>=1.1",
+    "matplotlib>=3.9",
+    "osmium>=4.3.1",
+    "pyarrow>=18",
+    "pyproj>=3.7",
+    "rich>=13",
+    "shapely>=2.0",
+    "typer>=0.15",
+]
+
+[project.scripts]
+coverage = "osm_polygon_wikidata_website_coverage.cli:app"
+
+[dependency-groups]
+dev = [
+    "mkdocs-material>=9.5",
+    "mutmut>=3.2",
+    "pre-commit>=4",
+    "pytest>=8.3",
+    "pytest-cov>=6",
+    "radon>=6",
+    "ruff>=0.8",
+    "ty>=0.0.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/osm_polygon_wikidata_website_coverage"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.12"
+root = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["osm_polygon_wikidata_website_coverage"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+
+[tool.mutmut]
+paths_to_mutate = ["src/osm_polygon_wikidata_website_coverage"]
+tests_dir = ["tests"]
+runner = "uv run pytest -q"
