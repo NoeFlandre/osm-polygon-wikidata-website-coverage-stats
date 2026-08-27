@@ -1,0 +1,1 @@
+"""Public artifact staging adapters."""

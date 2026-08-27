@@ -77,17 +77,29 @@ def _rounded_geojson(geometry: BaseGeometry) -> dict[str, Any]:
 
 
 def _polygonal(geometry: BaseGeometry) -> BaseGeometry:
-    if geometry.geom_type not in _POLYGON_TYPES:
-        raise GeometryError("geometry must be Polygon or MultiPolygon")
+    _check_polygon_type(geometry)
     if geometry.is_empty:
         raise GeometryError("geometry is empty")
-    if not geometry.is_valid:
-        geometry = geometry.buffer(0)
-    if geometry.is_empty or geometry.geom_type not in _POLYGON_TYPES:
+    return _validate_repaired(_repair(geometry))
+
+
+def _check_polygon_type(geometry: BaseGeometry) -> None:
+    if geometry.geom_type not in _POLYGON_TYPES:
+        raise GeometryError("geometry must be Polygon or MultiPolygon")
+
+
+def _validate_repaired(geometry: BaseGeometry) -> BaseGeometry:
+    if geometry.is_empty:
+        raise GeometryError("geometry repair did not remain polygonal")
+    if geometry.geom_type not in _POLYGON_TYPES:
         raise GeometryError("geometry repair did not remain polygonal")
     if geometry.area <= 0:
         raise GeometryError("geometry is degenerate")
     return geometry
+
+
+def _repair(geometry: BaseGeometry) -> BaseGeometry:
+    return geometry.buffer(0) if not geometry.is_valid else geometry
 
 
 def _oriented(geometry: BaseGeometry) -> BaseGeometry:
@@ -107,11 +119,19 @@ def _parse_geometry(value: str | Mapping[str, Any]) -> BaseGeometry:
 
 def _reject_antimeridian(geometry: BaseGeometry) -> None:
     min_lon, _, max_lon, _ = geometry.bounds
-    if min_lon < -180 or max_lon > 180 or max_lon - min_lon > 180:
+    if _longitude_is_unsupported(min_lon, max_lon):
         raise GeometryError("antimeridian geometry is not supported")
     _, min_lat, _, max_lat = geometry.bounds
-    if min_lat < -90 or max_lat > 90:
+    if _latitude_is_unsupported(min_lat, max_lat):
         raise GeometryError("latitude is outside WGS84 bounds")
+
+
+def _longitude_is_unsupported(min_lon: float, max_lon: float) -> bool:
+    return min_lon < -180 or max_lon > 180 or max_lon - min_lon > 180
+
+
+def _latitude_is_unsupported(min_lat: float, max_lat: float) -> bool:
+    return min_lat < -90 or max_lat > 90
 
 
 def _centroid(geometry: BaseGeometry) -> tuple[float, float]:

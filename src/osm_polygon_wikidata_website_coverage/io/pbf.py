@@ -12,6 +12,7 @@ import osmium.geom
 
 from osm_polygon_wikidata_website_coverage.domain.geometry import (
     GeometryError,
+    NormalizedGeometry,
     normalize_geometry,
     relation_kind,
 )
@@ -79,22 +80,11 @@ def _failure(
     return GeometryFailure(identity, source_pbf, candidate_kind, failure_kind, message)
 
 
-def classify_area(
-    area: Any,
-    *,
-    source_pbf: str,
-    region: str,
-    factory: Any | None = None,
-) -> Result | None:
-    """Convert one assembled libosmium area into an occurrence or failure."""
-
-    kind = _area_kind(area)
-    if kind is None:
-        return None
-    osm_type, relation_type = kind
-    candidate_kind = _candidate_kind(osm_type, relation_type)
+def _area_identity(
+    area: Any, *, osm_type: str, source_pbf: str, candidate_kind: str
+) -> OsmIdentity | GeometryFailure:
     try:
-        identity = OsmIdentity(osm_type, int(area.id))
+        return OsmIdentity(osm_type, int(area.id))
     except (TypeError, ValueError) as exc:
         return _failure(
             identity=None,
@@ -104,9 +94,17 @@ def classify_area(
             message=str(exc),
         )
 
-    geometry_factory = factory if factory is not None else osmium.geom.GeoJSONFactory()
+
+def _serialize_area(
+    area: Any,
+    *,
+    factory: Any,
+    identity: OsmIdentity,
+    source_pbf: str,
+    candidate_kind: str,
+) -> str | GeometryFailure:
     try:
-        raw_geometry = str(geometry_factory.create_multipolygon(area))
+        return str(factory.create_multipolygon(area))
     except (RuntimeError, TypeError, ValueError) as exc:
         return _failure(
             identity=identity,
@@ -115,8 +113,17 @@ def classify_area(
             failure_kind="geometry_serialization",
             message=f"{type(exc).__name__}: {exc}",
         )
+
+
+def _normalize_area(
+    raw_geometry: str,
+    *,
+    identity: OsmIdentity,
+    source_pbf: str,
+    candidate_kind: str,
+) -> NormalizedGeometry | GeometryFailure:
     try:
-        geometry = normalize_geometry(raw_geometry)
+        return normalize_geometry(raw_geometry)
     except GeometryError as exc:
         return _failure(
             identity=identity,
@@ -126,6 +133,48 @@ def classify_area(
             message=str(exc),
         )
 
+
+def _geometry_factory(factory: Any | None) -> Any:
+    return factory if factory is not None else osmium.geom.GeoJSONFactory()
+
+
+def _classify_candidate(
+    area: Any,
+    *,
+    osm_type: str,
+    relation_type: str | None,
+    candidate_kind: str,
+    source_pbf: str,
+    region: str,
+    factory: Any | None,
+) -> Result:
+    identity_result = _area_identity(
+        area,
+        osm_type=osm_type,
+        source_pbf=source_pbf,
+        candidate_kind=candidate_kind,
+    )
+    if isinstance(identity_result, GeometryFailure):
+        return identity_result
+    identity = identity_result
+    serialized = _serialize_area(
+        area,
+        factory=_geometry_factory(factory),
+        identity=identity,
+        source_pbf=source_pbf,
+        candidate_kind=candidate_kind,
+    )
+    if isinstance(serialized, GeometryFailure):
+        return serialized
+    geometry_result = _normalize_area(
+        serialized,
+        identity=identity,
+        source_pbf=source_pbf,
+        candidate_kind=candidate_kind,
+    )
+    if isinstance(geometry_result, GeometryFailure):
+        return geometry_result
+    geometry = geometry_result
     return Occurrence(
         identity=identity,
         source_pbf=source_pbf,
@@ -144,6 +193,31 @@ def classify_area(
         area_m2=geometry.area_m2,
         area_bucket=geometry.area_bucket,
         geometry_hash=geometry.geometry_hash,
+    )
+
+
+def classify_area(
+    area: Any,
+    *,
+    source_pbf: str,
+    region: str,
+    factory: Any | None = None,
+) -> Result | None:
+    """Convert one assembled libosmium area into an occurrence or failure."""
+
+    kind = _area_kind(area)
+    if kind is None:
+        return None
+    osm_type, relation_type = kind
+    candidate_kind = _candidate_kind(osm_type, relation_type)
+    return _classify_candidate(
+        area,
+        osm_type=osm_type,
+        relation_type=relation_type,
+        candidate_kind=candidate_kind,
+        source_pbf=source_pbf,
+        region=region,
+        factory=factory,
     )
 
 
@@ -182,14 +256,20 @@ def scan_pbf(
     if not path.is_file():
         raise PBFReadError(f"PBF path is not a file: {path}")
     try:
-        handler_type = _PolygonHandler if handler_factory is None else handler_factory
-        handler = handler_type(
-            callback=callback,
-            source_pbf=path.name,
-            region=region_from_filename(path),
-        )
+        handler = _build_handler(path, callback, handler_factory)
         handler.apply_file(str(path), locations=True)
     except PBFReadError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise PBFReadError(f"Failed to read PBF {path}: {exc}") from exc
+
+
+def _build_handler(
+    path: Path, callback: ResultCallback, handler_factory: HandlerFactory | None
+) -> Any:
+    handler_type = _PolygonHandler if handler_factory is None else handler_factory
+    return handler_type(
+        callback=callback,
+        source_pbf=path.name,
+        region=region_from_filename(path),
+    )

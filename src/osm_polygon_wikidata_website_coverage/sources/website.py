@@ -47,7 +47,7 @@ def website_parquet_files(root: Path) -> tuple[Path, ...]:
     polygon_root = root / "polygons"
     if not polygon_root.is_dir():
         raise SourceDatasetError(f"website polygons directory is missing: {polygon_root}")
-    files = tuple(sorted(polygon_root.glob("*.parquet"), key=lambda path: path.name))
+    files = tuple(sorted(polygon_root.glob("*.parquet")))
     if not files:
         raise SourceDatasetError(
             f"website polygons directory contains no Parquet files: {polygon_root}"

@@ -1,0 +1,22 @@
+site_name: OSM polygon text coverage
+site_description: Coverage statistics for raw OSM polygons against website, Wikipedia, and Wikivoyage text.
+site_url: https://noeflandre.github.io/osm-polygon-wikidata-website-coverage-stats/
+repo_url: https://github.com/NoeFlandre/osm-polygon-wikidata-website-coverage-stats
+repo_name: NoeFlandre/osm-polygon-wikidata-website-coverage-stats
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.sections
+    - content.code.copy
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences
+nav:
+  - Home: index.md
+  - Methodology: methodology.md
+  - Operations: operations.md
+  - Architecture: architecture.md

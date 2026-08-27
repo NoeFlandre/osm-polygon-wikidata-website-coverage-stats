@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 
 from osm_polygon_wikidata_website_coverage.domain.coverage import (
@@ -43,3 +45,13 @@ def test_source_flags_for_no_sources_are_uncovered() -> None:
 
     assert flags.covered_by_any_text is False
     assert flags.overlap_category == "neither"
+
+
+def test_coverage_flags_normalizes_every_boolean_input() -> None:
+    assert coverage_flags(
+        website=cast(bool, 1), wikipedia=cast(bool, object()), wikivoyage=cast(bool, [])
+    ) == SourceFlags(
+        website=True,
+        wikipedia=True,
+        wikivoyage=False,
+    )

@@ -1,10 +1,15 @@
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
-from osm_polygon_wikidata_website_coverage.pipeline.join import load_source_membership
+from osm_polygon_wikidata_website_coverage.pipeline.join import (
+    _write_distinct_keys,
+    load_source_membership,
+)
 
 
 def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
@@ -62,6 +67,7 @@ def test_load_source_membership_writes_three_key_only_tables_and_diagnostics(
         "wikipedia",
         "wikivoyage",
     }
+    assert {item.output_path for item in result.diagnostics} == set(result.membership_paths)
     website_diagnostic = next(item for item in result.diagnostics if item.source == "website")
     assert website_diagnostic.successful_key_count == 1
     assert website_diagnostic.duplicate_key_count == 1
@@ -80,3 +86,22 @@ def test_load_source_membership_writes_three_key_only_tables_and_diagnostics(
             Path("run/members/wikivoyage.parquet"),
         ]
     )
+
+    with pytest.raises(FileExistsError, match="membership table"):
+        load_source_membership(paths, tmp_path / "run")
+
+
+def test_membership_writer_handles_nested_and_quoted_output_paths(tmp_path: Path) -> None:
+    output = tmp_path / "parent's" / "deeper" / "members.parquet"
+    connection = duckdb.connect(database=":memory:")
+    try:
+        _write_distinct_keys(
+            connection,
+            "SELECT 'way' AS osm_type, 7::BIGINT AS osm_id",
+            [],
+            output,
+        )
+    finally:
+        connection.close()
+
+    assert pq.read_table(output).to_pylist() == [{"osm_type": "way", "osm_id": 7}]

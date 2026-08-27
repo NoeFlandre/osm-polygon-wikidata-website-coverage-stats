@@ -83,19 +83,30 @@ def canonical_occurrence(occurrences: tuple[Occurrence, ...] | list[Occurrence])
 
     if not occurrences:
         raise ValueError("at least one occurrence is required")
-    highest_version = max(
-        occurrence.osm_version if occurrence.osm_version is not None else -1
-        for occurrence in occurrences
-    )
-    version_matches = tuple(
-        occurrence
-        for occurrence in occurrences
-        if (occurrence.osm_version if occurrence.osm_version is not None else -1) == highest_version
-    )
+    highest_version = _highest_version(occurrences)
+    version_matches = _version_matches(occurrences, highest_version)
     newest_timestamp = max(occurrence.timestamp_value for occurrence in version_matches)
-    timestamp_matches = tuple(
-        occurrence
-        for occurrence in version_matches
-        if occurrence.timestamp_value == newest_timestamp
-    )
+    timestamp_matches = tuple(_timestamp_matches(version_matches, newest_timestamp))
     return min(timestamp_matches, key=lambda occurrence: occurrence.source_pbf)
+
+
+def _version_value(occurrence: Occurrence) -> int:
+    return occurrence.osm_version if occurrence.osm_version is not None else -1
+
+
+def _highest_version(occurrences: tuple[Occurrence, ...] | list[Occurrence]) -> int:
+    return max(_version_value(occurrence) for occurrence in occurrences)
+
+
+def _version_matches(
+    occurrences: tuple[Occurrence, ...] | list[Occurrence], version: int
+) -> tuple[Occurrence, ...]:
+    return tuple(occurrence for occurrence in occurrences if _version_value(occurrence) == version)
+
+
+def _timestamp_matches(
+    occurrences: tuple[Occurrence, ...], timestamp: datetime
+) -> tuple[Occurrence, ...]:
+    return tuple(
+        occurrence for occurrence in occurrences if occurrence.timestamp_value == timestamp
+    )

@@ -25,6 +25,7 @@ from osm_polygon_wikidata_website_coverage.pipeline.join import (
     MembershipResult,
     load_source_membership,
 )
+from osm_polygon_wikidata_website_coverage.reporting.render import render_reports
 
 Scanner = Callable[[Path, Callable[[Result], None]], None]
 
@@ -66,7 +67,7 @@ def _source_parquet_inventory(paths: DataPaths) -> list[dict[str, Any]]:
         ("wikidata", paths.wikidata_root),
         ("website", paths.website_root),
     ):
-        for path in sorted(root.rglob("*.parquet"), key=lambda item: str(item.relative_to(root))):
+        for path in sorted(root.rglob("*.parquet")):
             item = _file_metadata(path, relative_to=root, include_hash=False)
             item["source"] = label
             entries.append(item)
@@ -76,9 +77,15 @@ def _source_parquet_inventory(paths: DataPaths) -> list[dict[str, Any]]:
 def _generated_parquet_inventory(run_root: Path) -> list[dict[str, Any]]:
     return [
         _file_metadata(path, relative_to=run_root, include_hash=True)
-        for path in sorted(
-            run_root.rglob("*.parquet"), key=lambda item: str(item.relative_to(run_root))
-        )
+        for path in sorted(run_root.rglob("*.parquet"))
+    ]
+
+
+def _generated_artifact_inventory(run_root: Path) -> list[dict[str, Any]]:
+    return [
+        _file_metadata(path, relative_to=run_root, include_hash=True)
+        for path in sorted(run_root.rglob("*"))
+        if path.is_file() and not path.name.endswith(".tmp")
     ]
 
 
@@ -97,7 +104,10 @@ def _write_manifest(run_root: Path, payload: dict[str, Any]) -> Path:
     temporary = manifest_root / ".manifest.json.tmp"
     if manifest_path.exists() or temporary.exists():
         raise FileExistsError(f"refusing to overwrite completion manifest: {manifest_path}")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     temporary.replace(manifest_path)
     return manifest_path
 
@@ -110,6 +120,7 @@ def _manifest_payload(
     membership: MembershipResult,
     aggregation: AggregationResult,
     generated: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
 ) -> dict[str, Any]:
     input_inventory = [
         {
@@ -159,6 +170,8 @@ def _manifest_payload(
         ],
         "generated_parquet_count": len(generated),
         "generated_parquet_inventory": generated,
+        "generated_artifact_count": len(artifacts),
+        "generated_artifact_inventory": artifacts,
     }
 
 
@@ -181,7 +194,9 @@ def run_analysis(
         membership_root=extraction.run_root / "members",
         output_root=extraction.run_root,
     )
+    render_reports(aggregation.summary, extraction.run_root / "reports")
     generated = _generated_parquet_inventory(extraction.run_root)
+    artifacts = _generated_artifact_inventory(extraction.run_root)
     _validate_generated_parquets(generated, extraction.run_root)
     payload = _manifest_payload(
         paths=paths,
@@ -190,6 +205,7 @@ def run_analysis(
         membership=membership,
         aggregation=aggregation,
         generated=generated,
+        artifacts=artifacts,
     )
     manifest_path = _write_manifest(extraction.run_root, payload)
     return RunResult(extraction.run_root, extraction, membership, aggregation, manifest_path)

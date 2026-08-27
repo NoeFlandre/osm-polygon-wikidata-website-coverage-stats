@@ -9,6 +9,7 @@ site/
 .mypy_cache/
 .ty_cache/
 .mutmut-cache/
+mutants/
 htmlcov/
 coverage.xml
 

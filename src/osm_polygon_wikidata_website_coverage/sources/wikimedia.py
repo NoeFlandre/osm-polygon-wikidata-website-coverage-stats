@@ -44,7 +44,7 @@ def _files(root: Path, relative: str, description: str) -> tuple[Path, ...]:
     directory = root / relative
     if not directory.is_dir():
         raise SourceDatasetError(f"{description} directory is missing: {directory}")
-    files = tuple(sorted(directory.glob("*.parquet"), key=lambda path: path.name))
+    files = tuple(sorted(directory.glob("*.parquet")))
     if not files:
         raise SourceDatasetError(f"{description} directory contains no Parquet files: {directory}")
     return files

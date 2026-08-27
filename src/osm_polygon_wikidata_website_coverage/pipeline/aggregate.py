@@ -287,6 +287,138 @@ def _fetch_count(connection: duckdb.DuckDBPyConnection, query: str, parameters: 
     return int(row[0])
 
 
+def _source_counts(connection: duckdb.DuckDBPyConnection, compact: Path) -> dict[str, int]:
+    row = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN website THEN 1 ELSE 0 END),
+            SUM(CASE WHEN wikipedia THEN 1 ELSE 0 END),
+            SUM(CASE WHEN wikivoyage THEN 1 ELSE 0 END),
+            SUM(CASE WHEN covered_by_any_text THEN 1 ELSE 0 END)
+        FROM read_parquet(?)
+        """,
+        [str(compact)],
+    ).fetchone()
+    if row is None:
+        raise AggregationError("DuckDB returned no source-count row")
+    return {name: int(value or 0) for name, value in zip(_GROUP_METRICS, row, strict=True)}
+
+
+def _overlap_summary(
+    connection: duckdb.DuckDBPyConnection, compact: Path, total: int
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT overlap_category, COUNT(*)
+        FROM read_parquet(?)
+        GROUP BY overlap_category
+        """,
+        [str(compact)],
+    ).fetchall()
+    overlap_counts = {str(category): int(count) for category, count in rows}
+    return [
+        {
+            "category": category,
+            "count": overlap_counts.get(category, 0),
+            "percentage": _rate(overlap_counts.get(category, 0), total),
+        }
+        for category in EXPECTED_OVERLAP_CATEGORIES
+    ]
+
+
+def _area_statistics(
+    connection: duckdb.DuckDBPyConnection, compact: Path
+) -> dict[str, float | None]:
+    area_row = connection.execute(
+        """
+        SELECT
+            SUM(area_m2), MIN(area_m2), MAX(area_m2), AVG(area_m2),
+            MEDIAN(area_m2), QUANTILE_CONT(area_m2, 0.25),
+            QUANTILE_CONT(area_m2, 0.75), QUANTILE_CONT(area_m2, 0.95)
+        FROM read_parquet(?)
+        """,
+        [str(compact)],
+    ).fetchone()
+    if area_row is None:
+        raise AggregationError("DuckDB returned no area-statistics row")
+    return {
+        name: None if value is None else float(value)
+        for name, value in zip(
+            (
+                "total_m2",
+                "min_m2",
+                "max_m2",
+                "mean_m2",
+                "median_m2",
+                "p25_m2",
+                "p75_m2",
+                "p95_m2",
+            ),
+            area_row,
+            strict=True,
+        )
+    }
+
+
+def _type_counts(
+    connection: duckdb.DuckDBPyConnection, compact: Path, column: str
+) -> dict[str, int]:
+    rows = connection.execute(
+        f"SELECT {column}, COUNT(*) FROM read_parquet(?) GROUP BY {column} ORDER BY {column}",
+        [str(compact)],
+    ).fetchall()
+    return {str(kind): int(count) for kind, count in rows}
+
+
+def _pairwise_intersections(connection: duckdb.DuckDBPyConnection, compact: Path) -> dict[str, int]:
+    queries = {
+        "website_wikipedia": "website AND wikipedia",
+        "website_wikivoyage": "website AND wikivoyage",
+        "wikipedia_wikivoyage": "wikipedia AND wikivoyage",
+        "all_three": "website AND wikipedia AND wikivoyage",
+    }
+    return {
+        name: _fetch_count(
+            connection,
+            f"SELECT COUNT(*) FROM read_parquet(?) WHERE {predicate}",
+            [str(compact)],
+        )
+        for name, predicate in queries.items()
+    }
+
+
+def _source_audit(
+    connection: duckdb.DuckDBPyConnection,
+    compact: Path,
+    members: tuple[Path, Path, Path],
+) -> dict[str, int]:
+    return {
+        source: _fetch_count(
+            connection,
+            """
+            SELECT COUNT(*)
+            FROM read_parquet(?) AS membership
+            LEFT JOIN read_parquet(?) AS raw
+              USING (osm_type, osm_id)
+            WHERE raw.osm_id IS NULL
+            """,
+            [str(member), str(compact)],
+        )
+        for source, member in zip(("website", "wikipedia", "wikivoyage"), members, strict=True)
+    }
+
+
+def _failure_count(connection: duckdb.DuckDBPyConnection, failure_root: Path) -> int:
+    failure_files = tuple(sorted(failure_root.glob("*.parquet"))) if failure_root.is_dir() else ()
+    if not failure_files:
+        return 0
+    return _fetch_count(
+        connection,
+        "SELECT COUNT(*) FROM read_parquet(?)",
+        [str(failure_root / "*.parquet")],
+    )
+
+
 def _membership_paths(root: Path) -> tuple[Path, Path, Path]:
     website = root / "website.parquet"
     wikipedia = root / "wikipedia.parquet"
@@ -355,133 +487,16 @@ def _fetch_summary(
     failure_root: Path,
 ) -> dict[str, Any]:
     total = _fetch_count(connection, "SELECT COUNT(*) FROM read_parquet(?)", [str(compact)])
-    counts_row = connection.execute(
-        """
-        SELECT
-            SUM(CASE WHEN website THEN 1 ELSE 0 END),
-            SUM(CASE WHEN wikipedia THEN 1 ELSE 0 END),
-            SUM(CASE WHEN wikivoyage THEN 1 ELSE 0 END),
-            SUM(CASE WHEN covered_by_any_text THEN 1 ELSE 0 END)
-        FROM read_parquet(?)
-        """,
-        [str(compact)],
-    ).fetchone()
-    if counts_row is None:
-        raise AggregationError("DuckDB returned no source-count row")
-    source_counts = {
-        name: int(value or 0) for name, value in zip(_GROUP_METRICS, counts_row, strict=True)
-    }
-    overlap_rows = connection.execute(
-        """
-        SELECT overlap_category, COUNT(*)
-        FROM read_parquet(?)
-        GROUP BY overlap_category
-        """,
-        [str(compact)],
-    ).fetchall()
-    overlap_counts = {str(category): int(count) for category, count in overlap_rows}
-    overlaps = [
-        {
-            "category": category,
-            "count": overlap_counts.get(category, 0),
-            "percentage": (overlap_counts.get(category, 0) / total * 100) if total else 0.0,
-        }
-        for category in EXPECTED_OVERLAP_CATEGORIES
-    ]
-    area_row = connection.execute(
-        """
-        SELECT
-            SUM(area_m2), MIN(area_m2), MAX(area_m2), AVG(area_m2),
-            MEDIAN(area_m2), QUANTILE_CONT(area_m2, 0.25),
-            QUANTILE_CONT(area_m2, 0.75), QUANTILE_CONT(area_m2, 0.95)
-        FROM read_parquet(?)
-        """,
-        [str(compact)],
-    ).fetchone()
-    if area_row is None:
-        raise AggregationError("DuckDB returned no area-statistics row")
-    type_rows = connection.execute(
-        "SELECT osm_type, COUNT(*) FROM read_parquet(?) GROUP BY osm_type ORDER BY osm_type",
-        [str(compact)],
-    ).fetchall()
-    geometry_rows = connection.execute(
-        "SELECT geometry_type, COUNT(*) "
-        "FROM read_parquet(?) "
-        "GROUP BY geometry_type ORDER BY geometry_type",
-        [str(compact)],
-    ).fetchall()
-    pairwise = {
-        "website_wikipedia": _fetch_count(
-            connection,
-            "SELECT COUNT(*) FROM read_parquet(?) WHERE website AND wikipedia",
-            [str(compact)],
-        ),
-        "website_wikivoyage": _fetch_count(
-            connection,
-            "SELECT COUNT(*) FROM read_parquet(?) WHERE website AND wikivoyage",
-            [str(compact)],
-        ),
-        "wikipedia_wikivoyage": _fetch_count(
-            connection,
-            "SELECT COUNT(*) FROM read_parquet(?) WHERE wikipedia AND wikivoyage",
-            [str(compact)],
-        ),
-        "all_three": _fetch_count(
-            connection,
-            "SELECT COUNT(*) FROM read_parquet(?) WHERE website AND wikipedia AND wikivoyage",
-            [str(compact)],
-        ),
-    }
-    source_keys_not_in_raw = {
-        source: _fetch_count(
-            connection,
-            """
-            SELECT COUNT(*)
-            FROM read_parquet(?) AS membership
-            LEFT JOIN read_parquet(?) AS raw
-              USING (osm_type, osm_id)
-            WHERE raw.osm_id IS NULL
-            """,
-            [str(member), str(compact)],
-        )
-        for source, member in zip(("website", "wikipedia", "wikivoyage"), members, strict=True)
-    }
-    failure_files = tuple(sorted(failure_root.glob("*.parquet"))) if failure_root.is_dir() else ()
-    geometry_failure_count = (
-        _fetch_count(
-            connection,
-            "SELECT COUNT(*) FROM read_parquet(?)",
-            [str(failure_root / "*.parquet")],
-        )
-        if failure_files
-        else 0
-    )
     summary = {
         "valid_universe_count": total,
-        **source_counts,
-        "geometry_failure_count": geometry_failure_count,
-        "source_keys_not_in_raw": source_keys_not_in_raw,
-        "overlap_categories": overlaps,
-        "pairwise_intersections": pairwise,
-        "osm_type_counts": {str(kind): int(count) for kind, count in type_rows},
-        "geometry_type_counts": {str(kind): int(count) for kind, count in geometry_rows},
-        "area_statistics": {
-            name: (None if value is None else float(value))
-            for name, value in zip(
-                (
-                    "total_m2",
-                    "min_m2",
-                    "max_m2",
-                    "mean_m2",
-                    "median_m2",
-                    "p25_m2",
-                    "p75_m2",
-                    "p95_m2",
-                ),
-                area_row,
-                strict=True,
-            )
-        },
+        **_source_counts(connection, compact),
+        "geometry_failure_count": _failure_count(connection, failure_root),
+        "source_keys_not_in_raw": _source_audit(connection, compact, members),
+        "overlap_categories": _overlap_summary(connection, compact, total),
+        "pairwise_intersections": _pairwise_intersections(connection, compact),
+        "osm_type_counts": _type_counts(connection, compact, "osm_type"),
+        "geometry_type_counts": _type_counts(connection, compact, "geometry_type"),
+        "area_statistics": _area_statistics(connection, compact),
     }
     return summary
 
@@ -536,6 +551,84 @@ def _write_rows(path: Path, schema: pa.Schema, rows: list[dict[str, Any]]) -> No
     os.replace(temporary, path)
 
 
+def _fixed_metric_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    fixed_metrics = (
+        "valid_universe_count",
+        "website_count",
+        "wikipedia_count",
+        "wikivoyage_count",
+        "covered_by_any_text_count",
+        "geometry_failure_count",
+    )
+    return [
+        {
+            "scope": "global",
+            "group_name": "all",
+            "metric": metric,
+            "value": float(summary[metric]),
+        }
+        for metric in fixed_metrics
+    ]
+
+
+def _area_metric_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "scope": "area",
+            "group_name": "all",
+            "metric": metric,
+            "value": float(value),
+        }
+        for metric, value in summary["area_statistics"].items()
+        if value is not None
+    ]
+
+
+def _source_audit_metric_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "scope": "source_audit",
+            "group_name": source,
+            "metric": "keys_not_in_raw_universe",
+            "value": float(count),
+        }
+        for source, count in summary["source_keys_not_in_raw"].items()
+    ]
+
+
+def _type_metric_rows(summary: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "scope": key,
+            "group_name": kind,
+            "metric": "valid_polygon_count",
+            "value": float(count),
+        }
+        for kind, count in summary[f"{key}_counts"].items()
+    ]
+
+
+def _metric_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        *_fixed_metric_rows(summary),
+        *_area_metric_rows(summary),
+        *_source_audit_metric_rows(summary),
+        *_type_metric_rows(summary, "osm_type"),
+        *_type_metric_rows(summary, "geometry_type"),
+    ]
+
+
+def _overlap_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "overlap_category": item["category"],
+            "count": item["count"],
+            "percentage": item["percentage"],
+        }
+        for item in summary["overlap_categories"]
+    ]
+
+
 def _write_summary_outputs(
     connection: duckdb.DuckDBPyConnection,
     compact: Path,
@@ -545,76 +638,10 @@ def _write_summary_outputs(
     occurrence_root: Path,
 ) -> tuple[Path, ...]:
     summaries_root = output_root / "summaries"
-    metric_rows: list[dict[str, Any]] = []
-    fixed_metrics = (
-        "valid_universe_count",
-        "website_count",
-        "wikipedia_count",
-        "wikivoyage_count",
-        "covered_by_any_text_count",
-        "geometry_failure_count",
-    )
-    metric_rows.extend(
-        {
-            "scope": "global",
-            "group_name": "all",
-            "metric": metric,
-            "value": float(summary[metric]),
-        }
-        for metric in fixed_metrics
-    )
-    metric_rows.extend(
-        {
-            "scope": "area",
-            "group_name": "all",
-            "metric": metric,
-            "value": float(value),
-        }
-        for metric, value in summary["area_statistics"].items()
-        if value is not None
-    )
-    metric_rows.extend(
-        {
-            "scope": "source_audit",
-            "group_name": source,
-            "metric": "keys_not_in_raw_universe",
-            "value": float(count),
-        }
-        for source, count in summary["source_keys_not_in_raw"].items()
-    )
-    metric_rows.extend(
-        {
-            "scope": "osm_type",
-            "group_name": kind,
-            "metric": "valid_polygon_count",
-            "value": float(count),
-        }
-        for kind, count in summary["osm_type_counts"].items()
-    )
-    metric_rows.extend(
-        {
-            "scope": "geometry_type",
-            "group_name": kind,
-            "metric": "valid_polygon_count",
-            "value": float(count),
-        }
-        for kind, count in summary["geometry_type_counts"].items()
-    )
     global_summary = summaries_root / "global.parquet"
-    _write_rows(global_summary, GLOBAL_SUMMARY_SCHEMA, metric_rows)
+    _write_rows(global_summary, GLOBAL_SUMMARY_SCHEMA, _metric_rows(summary))
     overlap_summary = summaries_root / "by-overlap.parquet"
-    _write_rows(
-        overlap_summary,
-        OVERLAP_SUMMARY_SCHEMA,
-        [
-            {
-                "overlap_category": item["category"],
-                "count": item["count"],
-                "percentage": item["percentage"],
-            }
-            for item in summary["overlap_categories"]
-        ],
-    )
+    _write_rows(overlap_summary, OVERLAP_SUMMARY_SCHEMA, _overlap_rows(summary))
     by_pbf_summary = summaries_root / "by-source-pbf.parquet"
     _write_rows(by_pbf_summary, GROUP_SUMMARY_SCHEMA, _group_rows(connection, by_pbf, "source_pbf"))
     by_region_summary = summaries_root / "by-region.parquet"
@@ -707,6 +734,26 @@ def summarize_rows(rows: Iterable[Mapping[str, object]]) -> dict[str, Any]:
     }
 
 
+def _aggregate_target(occurrence_root: Path, output_root: Path | None) -> Path:
+    return occurrence_root.parent if output_root is None else output_root
+
+
+def _validate_aggregate_inputs(
+    occurrence_root: Path, membership_root: Path
+) -> tuple[Path, Path, Path]:
+    _parquet_files(occurrence_root, "occurrence")
+    return _membership_paths(membership_root)
+
+
+def _validate_aggregate_target(target: Path) -> None:
+    existing_outputs = tuple(
+        target / name for name in ("coverage", "summaries", "scratch") if (target / name).exists()
+    )
+    if existing_outputs:
+        names = ", ".join(str(path) for path in existing_outputs)
+        raise AggregationError(f"aggregate output directories already exist: {names}")
+
+
 def aggregate_run(
     *,
     occurrence_root: Path,
@@ -715,15 +762,9 @@ def aggregate_run(
 ) -> AggregationResult:
     """Aggregate occurrence and membership shards into compact coverage outputs."""
 
-    _parquet_files(occurrence_root, "occurrence")
-    members = _membership_paths(membership_root)
-    target = occurrence_root.parent if output_root is None else output_root
-    existing_outputs = tuple(
-        target / name for name in ("coverage", "summaries", "scratch") if (target / name).exists()
-    )
-    if existing_outputs:
-        names = ", ".join(str(path) for path in existing_outputs)
-        raise AggregationError(f"aggregate output directories already exist: {names}")
+    members = _validate_aggregate_inputs(occurrence_root, membership_root)
+    target = _aggregate_target(occurrence_root, output_root)
+    _validate_aggregate_target(target)
     target.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect(database=":memory:")
     try:

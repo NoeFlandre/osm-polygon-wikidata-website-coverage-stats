@@ -1,6 +1,10 @@
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parents[2]
+PROJECT_ROOT = next(
+    candidate
+    for candidate in (Path.cwd(), *Path(__file__).parents)
+    if (candidate / "pyproject.toml").is_file()
+)
 
 
 def test_required_project_files_exist() -> None:
@@ -11,6 +15,7 @@ def test_required_project_files_exist() -> None:
         "CITATION.cff",
         ".pre-commit-config.yaml",
         "Dockerfile",
+        "scripts/check_crap.py",
     )
 
     assert all((PROJECT_ROOT / name).is_file() for name in required)

@@ -29,6 +29,19 @@ def _overlaps(first: Path, second: Path) -> bool:
     return _is_within(first, second) or _is_within(second, first)
 
 
+def _source_roots(
+    raw_pbf_root: Path | str, wikidata_root: Path | str, website_root: Path | str
+) -> tuple[Path, ...]:
+    return tuple(_absolute(path) for path in (raw_pbf_root, wikidata_root, website_root))
+
+
+def _validate_source_root(output_root: Path, source_root: Path) -> None:
+    if not source_root.is_dir():
+        raise ValueError(f"source root is not a directory: {source_root}")
+    if _overlaps(output_root, source_root):
+        raise ValueError(f"source root overlaps output root: {source_root}")
+
+
 def _validate_run_id(run_id: str) -> None:
     path = Path(run_id)
     if not run_id or path.is_absolute() or len(path.parts) != 1 or path.name in {".", ".."}:
@@ -57,14 +70,9 @@ class DataPaths:
         if not _is_within(output_root, DEFAULT_PROJECTS_ROOT):
             raise ValueError("data root must be under the Seagate projects volume")
 
-        source_roots = tuple(
-            _absolute(path) for path in (raw_pbf_root, wikidata_root, website_root)
-        )
+        source_roots = _source_roots(raw_pbf_root, wikidata_root, website_root)
         for source_root in source_roots:
-            if not source_root.is_dir():
-                raise ValueError(f"source root is not a directory: {source_root}")
-            if _overlaps(output_root, source_root):
-                raise ValueError(f"source root overlaps output root: {source_root}")
+            _validate_source_root(output_root, source_root)
 
         return cls(output_root, *source_roots)
 

@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
 from osm_polygon_wikidata_website_coverage.domain.identity import (
     Occurrence,
     OsmIdentity,
+    _version_value,
     canonical_occurrence,
 )
 
@@ -13,7 +14,7 @@ def _occurrence(
     source_pbf: str,
     *,
     osm_version: int | None,
-    osm_timestamp: str | None,
+    osm_timestamp: str | datetime | None,
 ) -> Occurrence:
     return Occurrence(
         identity=OsmIdentity("way", 7),
@@ -64,6 +65,12 @@ def test_identity_rejects_non_polygon_osm_types() -> None:
         OsmIdentity("node", 7)
 
 
+@pytest.mark.parametrize("osm_id", [0, -1])
+def test_identity_rejects_nonpositive_ids(osm_id: int) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        OsmIdentity("way", osm_id)
+
+
 def test_occurrence_rejects_empty_source_name() -> None:
     with pytest.raises(ValueError, match="source PBF"):
         Occurrence(
@@ -81,3 +88,30 @@ def test_occurrence_timestamp_is_available_as_datetime() -> None:
     )
 
     assert occurrence.timestamp_value == datetime.fromisoformat("2026-01-02T03:04:05+00:00")
+
+
+def test_occurrence_timestamp_handles_missing_datetime_and_naive_values() -> None:
+    missing = _occurrence("missing.osm.pbf", osm_version=1, osm_timestamp=None)
+    naive = _occurrence("naive.osm.pbf", osm_version=1, osm_timestamp=datetime(2026, 1, 2, 3, 4, 5))
+    aware = _occurrence(
+        "aware.osm.pbf",
+        osm_version=1,
+        osm_timestamp=datetime(2026, 1, 2, 4, 4, 5, tzinfo=timezone(timedelta(hours=1))),
+    )
+
+    assert missing.timestamp_value == datetime.min.replace(tzinfo=UTC)
+    assert naive.timestamp_value == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    assert aware.timestamp_value == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+def test_canonical_occurrence_rejects_empty_input() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        canonical_occurrence([])
+
+
+def test_canonical_occurrence_empty_error_and_missing_versions_are_exact() -> None:
+    with pytest.raises(ValueError, match="^at least one occurrence is required$"):
+        canonical_occurrence([])
+    assert (
+        _version_value(_occurrence("missing.osm.pbf", osm_version=None, osm_timestamp=None)) == -1
+    )

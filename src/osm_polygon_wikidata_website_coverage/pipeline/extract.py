@@ -64,19 +64,26 @@ class ExtractionResult:
 def _pbf_files(raw_root: Path) -> tuple[Path, ...]:
     if not raw_root.is_dir():
         raise ExtractionError(f"raw PBF root is not a directory: {raw_root}")
-    files = tuple(
-        sorted(
-            (path for path in raw_root.glob("*.osm.pbf") if path.is_file()),
-            key=lambda path: path.name,
-        )
-    )
+    files = _regular_pbf_files(raw_root)
     if not files:
         raise ExtractionError(f"raw PBF root contains no regular PBF files: {raw_root}")
-    unreadable = tuple(path for path in files if not os.access(path, os.R_OK))
+    unreadable = _unreadable_pbf_files(files)
     if unreadable:
         names = ", ".join(path.name for path in unreadable)
         raise ExtractionError(f"raw PBF files are unreadable: {names}")
     return files
+
+
+def _regular_pbf_files(raw_root: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            (path for path in raw_root.glob("*.osm.pbf") if path.is_file()),
+        )
+    )
+
+
+def _unreadable_pbf_files(files: tuple[Path, ...]) -> tuple[Path, ...]:
+    return tuple(path for path in files if not os.access(path, os.R_OK))
 
 
 def _assert_unchanged(before: SourceSnapshot, after: SourceSnapshot) -> None:

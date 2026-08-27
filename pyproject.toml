@@ -68,6 +68,16 @@ fail_under = 100
 show_missing = true
 
 [tool.mutmut]
-paths_to_mutate = ["src/osm_polygon_wikidata_website_coverage"]
-tests_dir = ["tests"]
+source_paths = ["src/osm_polygon_wikidata_website_coverage"]
+also_copy = ["CITATION.cff", "LICENSE"]
+pytest_add_cli_args_test_selection = [
+    "tests/config",
+    "tests/domain",
+    "tests/io",
+    "tests/pipeline",
+    "tests/sources",
+    "tests/cli",
+    "tests/publishing",
+    "tests/reporting",
+]
 runner = "uv run pytest -q"
