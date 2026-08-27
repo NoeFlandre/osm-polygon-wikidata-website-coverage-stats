@@ -1,0 +1,17 @@
+.worktrees/
+
+# Local environments and generated documentation output.
+.venv/
+site/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ty_cache/
+.mutmut-cache/
+htmlcov/
+coverage.xml
+
+# Project data and run artifacts stay on the Seagate volume.
+data/
+runs/
+*.coverage
