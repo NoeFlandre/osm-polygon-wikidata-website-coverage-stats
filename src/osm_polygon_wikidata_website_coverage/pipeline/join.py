@@ -63,11 +63,15 @@ def _write_distinct_keys(
     query: str,
     parameters: list[str],
     output_path: Path,
+    *,
+    replace_existing: bool = False,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.tmp")
-    if output_path.exists() or temporary.exists():
+    if not replace_existing and (output_path.exists() or temporary.exists()):
         raise FileExistsError(f"refusing to overwrite membership table: {output_path}")
+    if replace_existing:
+        temporary.unlink(missing_ok=True)
     destination = str(temporary).replace("'", "''")
     connection.execute(
         f"""
@@ -90,9 +94,16 @@ def _materialize(
     input_file_count: int,
     connection: duckdb.DuckDBPyConnection,
     output_path: Path,
+    replace_existing: bool,
 ) -> MembershipDiagnostic:
     successful_row_count, successful_key_count = _count_keys(connection, query, parameters)
-    _write_distinct_keys(connection, query, parameters, output_path)
+    _write_distinct_keys(
+        connection,
+        query,
+        parameters,
+        output_path,
+        replace_existing=replace_existing,
+    )
     return MembershipDiagnostic(
         source=source,
         input_file_count=input_file_count,
@@ -103,7 +114,9 @@ def _materialize(
     )
 
 
-def load_source_membership(paths: DataPaths, run_root: Path) -> MembershipResult:
+def load_source_membership(
+    paths: DataPaths, run_root: Path, *, resume: bool = False
+) -> MembershipResult:
     """Read source trees and write three key-only membership Parquets."""
 
     members_root = run_root / "members"
@@ -122,6 +135,7 @@ def load_source_membership(paths: DataPaths, run_root: Path) -> MembershipResult
                 input_file_count=len(website_files),
                 connection=website_connection,
                 output_path=website_output,
+                replace_existing=resume,
             )
         )
         membership_paths.append(website_output)
@@ -140,6 +154,7 @@ def load_source_membership(paths: DataPaths, run_root: Path) -> MembershipResult
                     input_file_count=len(link_files) + len(document_files),
                     connection=connection,
                     output_path=output,
+                    replace_existing=resume,
                 )
             )
             membership_paths.append(output)

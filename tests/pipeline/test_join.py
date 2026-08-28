@@ -90,6 +90,10 @@ def test_load_source_membership_writes_three_key_only_tables_and_diagnostics(
     with pytest.raises(FileExistsError, match="membership table"):
         load_source_membership(paths, tmp_path / "run")
 
+    resumed = load_source_membership(paths, tmp_path / "run", resume=True)
+    assert resumed.membership_paths == result.membership_paths
+    assert resumed.diagnostics == result.diagnostics
+
 
 def test_membership_writer_handles_nested_and_quoted_output_paths(tmp_path: Path) -> None:
     output = tmp_path / "parent's" / "deeper" / "members.parquet"
@@ -101,6 +105,13 @@ def test_membership_writer_handles_nested_and_quoted_output_paths(tmp_path: Path
             [],
             output,
         )
+        with pytest.raises(FileExistsError, match="membership table"):
+            _write_distinct_keys(
+                connection,
+                "SELECT 'way' AS osm_type, 8::BIGINT AS osm_id",
+                [],
+                output,
+            )
     finally:
         connection.close()
 

@@ -125,6 +125,8 @@ class _ShardWriter[ValueT]:
         if self._closed:
             return
         self._flush()
+        if self._shard_index == 0:
+            self._write_shard()
         self._closed = True
 
     def __enter__(self) -> _ShardWriter[ValueT]:
@@ -136,6 +138,9 @@ class _ShardWriter[ValueT]:
     def _flush(self) -> None:
         if not self._rows:
             return
+        self._write_shard()
+
+    def _write_shard(self) -> None:
         final = self._directory / f"{self._source_stem}-{self._shard_index:05d}.parquet"
         temporary = self._directory / f".{final.name}.tmp"
         if final.exists() or temporary.exists():

@@ -16,6 +16,7 @@ from osm_polygon_wikidata_website_coverage.config.paths import (
     DEFAULT_WIKIDATA_ROOT,
     DataPaths,
 )
+from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.run import run_analysis
 
 app = typer.Typer(
@@ -60,16 +61,37 @@ def preflight(
 
 @app.command("run")
 def run_command(
-    run_id: str = typer.Option("20260827-coverage-v1", help="Unique run identifier."),
+    run_id: str = typer.Option("20260828-coverage-v5", help="Unique run identifier."),
+    workers: int = typer.Option(4, min=1, help="Independent PBF extraction workers."),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="Seagate output root."),
     raw_pbf_root: Path = typer.Option(DEFAULT_RAW_PBF_ROOT, help="Read-only raw PBF root."),
     wikidata_root: Path = typer.Option(DEFAULT_WIKIDATA_ROOT, help="Read-only Wikidata root."),
     website_root: Path = typer.Option(DEFAULT_WEBSITE_ROOT, help="Read-only website root."),
+    with_geometry: bool = typer.Option(
+        False,
+        "--with-geometry/--coverage-only",
+        help="Assemble and calculate full geometry metrics; coverage-only is faster.",
+    ),
+    resume: bool = typer.Option(
+        True,
+        "--resume/--fresh",
+        help="Reuse completed per-PBF checkpoints when rerunning an interrupted run.",
+    ),
 ) -> None:
     """Extract, join, aggregate, render, and verify one complete run."""
 
     paths = _paths(data_root, raw_pbf_root, wikidata_root, website_root)
-    result = run_analysis(paths, run_id)
+    if with_geometry:
+        result = run_analysis(paths, run_id, resume=resume, workers=workers)
+    else:
+        result = run_analysis(
+            paths,
+            run_id,
+            batch_rows=50_000,
+            resume=resume,
+            scanner=scan_pbf_keys,
+            workers=workers,
+        )
     typer.echo(f"completed run: {result.run_root}")
     typer.echo(f"valid polygon universe: {result.aggregation.global_row_count}")
 

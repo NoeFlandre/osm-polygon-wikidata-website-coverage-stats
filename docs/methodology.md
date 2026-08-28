@@ -2,19 +2,24 @@
 
 ## Sets and denominator
 
-Let `U` be the unique set of valid polygon identities assembled from all raw
-PBFs. The identity key is `(osm_type, osm_id)`, with `osm_type` restricted to
-`way` and `relation`. Closed ways are assembled by libosmium. Relations are
-included only for `type=multipolygon` and `type=boundary`. Duplicate raw
-occurrences collapse globally; the highest OSM version wins, then the newest
-timestamp, then the lexicographically smallest source PBF. All contributing
-PBF names remain in provenance.
+Let `U` be the unique set of raw structural polygon identities emitted from
+all raw PBFs. The identity key is `(osm_type, osm_id)`, with `osm_type`
+restricted to `way` and `relation`. Closed ways are identified structurally
+from their node sequence, including untagged ways. Relations are candidate
+polygons only when their structural `type` is `multipolygon` or `boundary`;
+this is not a content-tag filter. Duplicate raw occurrences collapse
+globally; the highest OSM version wins, then the newest timestamp, then the
+lexicographically smallest source PBF. All contributing PBF names remain in
+provenance, together with their distinct count.
 
-The headline denominator is `|U|`, the count of valid successfully assembled
-polygon geometries. A raw candidate whose geometry cannot be normalized is
-recorded in a separate geometry-failure audit and is not classified as
-uncovered text. Source membership keys that do not occur in `U` are also
-reported separately and do not enlarge the denominator.
+The default coverage-only denominator is `|U|`, the raw structural candidate
+universe. It intentionally avoids geometry assembly because the coverage
+question is about membership of raw polygon identities. The optional
+`--with-geometry` mode additionally assembles and validates polygon geometry;
+its invalid candidates are recorded in a separate geometry-failure audit and
+excluded from that mode's valid-geometry denominator. Source membership keys
+that do not occur in `U` are also reported separately and do not enlarge the
+denominator.
 
 ## Successful text predicates
 
@@ -63,6 +68,11 @@ representation and hash. Area uses `pyproj.Geod` on WGS84. Centroids use a
 local Lambert azimuthal equal-area projection, then transform back to WGS84.
 Outputs retain geometry type, centroid, bounding box, area, area bucket, and
 geometry hash; full geometry is kept only in local run occurrence shards.
+
+The public compact row exposes the source flags as `website`, `wikipedia`, and
+`wikivoyage`, plus `contributing_pbf_count` and the JSON `source_pbfs` list.
+Per-source-PBF and per-region metric tables repeat the coverage rates, all
+eight overlap categories, area statistics, and OSM/geometry type counts.
 
 ## Licensing and attribution
 

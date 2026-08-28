@@ -227,36 +227,43 @@ def test_geometry_orientation_passes_explicit_positive_sign_to_every_polygon(
     ]
 
 
-def test_geometry_parser_and_centroid_use_explicit_projection_contract(
+def test_geometry_parser_and_centroid_use_local_laea_projection_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(GeometryError, match="^invalid GeoJSON geometry$"):
         _parse_geometry("not-json")
 
     calls: list[dict[str, object]] = []
+    projection_calls: list[dict[str, object]] = []
 
-    class FakeTransformer:
-        def __init__(self, source: object, target: object, always_xy: object) -> None:
-            self.source = source
-            self.target = target
-            self.always_xy = always_xy
+    class FakeProjection:
+        def __init__(self, **kwargs: object) -> None:
+            projection_calls.append(kwargs)
+            self.kwargs = kwargs
 
-        @classmethod
-        def from_crs(cls, source: object, target: object, **kwargs: object) -> "FakeTransformer":
-            calls.append({"source": source, "target": target, **kwargs})
-            return cls(source, target, kwargs["always_xy"])
-
-        def transform(self, x: float, y: float) -> tuple[float, float]:
+        def __call__(self, x: float, y: float, *, inverse: bool = False) -> tuple[float, float]:
+            calls.append({"x": x, "y": y, "inverse": inverse})
             return x, y
 
-    monkeypatch.setattr(geometry_module.Transformer, "from_crs", FakeTransformer.from_crs)
+    monkeypatch.setattr(geometry_module, "Proj", FakeProjection)
     longitude, latitude = _centroid(Polygon(_square()))
 
     assert (longitude, latitude) == pytest.approx((0.5, 0.5), abs=1e-6)
-    assert calls[0]["source"] == "EPSG:4326"
-    assert calls[0]["always_xy"] is True
-    assert calls[1]["target"] == "EPSG:4326"
-    assert calls[1]["always_xy"] is True
+    assert projection_calls == [
+        {
+            "proj": "laea",
+            "lat_0": 0.5,
+            "lon_0": 0.5,
+            "datum": "WGS84",
+            "units": "m",
+        }
+    ]
+    assert calls[0] == {
+        "x": (0.0, 1.0, 1.0, 0.0, 0.0),
+        "y": (0.0, 0.0, 1.0, 1.0, 0.0),
+        "inverse": False,
+    }
+    assert calls[-1]["inverse"] is True
 
 
 @pytest.mark.parametrize(

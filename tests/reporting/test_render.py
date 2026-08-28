@@ -10,6 +10,7 @@ from osm_polygon_wikidata_website_coverage.reporting.render import (
     _category_rows,
     _render_area_chart,
     _render_coverage_chart,
+    _write_report,
     _write_text,
     render_markdown,
     render_reports,
@@ -149,6 +150,31 @@ def test_markdown_report_skips_missing_area_statistics_and_derives_missing_perce
     report = render_markdown(summary, tmp_path / "report.md")
 
     assert "p25_m2" not in report.read_text(encoding="utf-8")
+
+
+def test_area_lines_only_formats_present_area_statistics() -> None:
+    assert render_module._area_lines(
+        {"area_statistics": {"min_m2": 1, "missing_m2": None, "max_m2": 2.5}}
+    ) == ["- min_m2: 1.00 m²", "- max_m2: 2.50 m²"]
+    assert render_module._area_lines({}) == []
+
+
+def test_report_writer_forwards_resume_replacement_policy(tmp_path: Path) -> None:
+    output = tmp_path / "report.md"
+    output.write_text("old", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="overwrite report"):
+        _write_report(output, "new", resume=False)
+    assert _write_report(output, "new", resume=True) == output
+    assert output.read_text(encoding="utf-8") == "new"
+
+
+def test_markdown_renderer_is_fresh_by_default(tmp_path: Path) -> None:
+    output = tmp_path / "report.md"
+    render_markdown(_summary(), output)
+
+    with pytest.raises(FileExistsError, match="overwrite report"):
+        render_markdown(_summary(), output)
 
 
 def test_markdown_report_uses_defaults_for_optional_summary_fields(tmp_path: Path) -> None:
@@ -377,6 +403,11 @@ def test_render_reports_writes_deterministic_public_artifacts(tmp_path: Path) ->
             hashlib.sha256(first_path.read_bytes()).digest()
             == hashlib.sha256(second_path.read_bytes()).digest()
         )
+
+    resumed = render_reports(summary, tmp_path / "first", resume=True)
+    assert resumed == first
+    assert (tmp_path / "first" / "summary.json").is_file()
+    assert (tmp_path / "first" / "report.md").is_file()
 
 
 def test_render_reports_passes_the_exact_json_serialization_contract(

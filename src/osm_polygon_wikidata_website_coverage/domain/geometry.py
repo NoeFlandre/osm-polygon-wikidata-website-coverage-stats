@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pyproj import CRS, Geod, Transformer
+from pyproj import Geod, Proj
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
@@ -136,14 +136,10 @@ def _latitude_is_unsupported(min_lat: float, max_lat: float) -> bool:
 
 def _centroid(geometry: BaseGeometry) -> tuple[float, float]:
     seed = geometry.centroid
-    local_crs = CRS.from_proj4(
-        f"+proj=laea +lat_0={seed.y} +lon_0={seed.x} +datum=WGS84 +units=m +no_defs"
-    )
-    forward = Transformer.from_crs("EPSG:4326", local_crs, always_xy=True)
-    inverse = Transformer.from_crs(local_crs, "EPSG:4326", always_xy=True)
-    projected = transform(forward.transform, geometry)
+    projection = Proj(proj="laea", lat_0=seed.y, lon_0=seed.x, datum="WGS84", units="m")
+    projected = transform(projection, geometry)
     projected_centroid = projected.centroid
-    longitude, latitude = inverse.transform(projected_centroid.x, projected_centroid.y)
+    longitude, latitude = projection(projected_centroid.x, projected_centroid.y, inverse=True)
     return float(longitude), float(latitude)
 
 

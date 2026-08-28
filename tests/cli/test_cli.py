@@ -83,10 +83,10 @@ def test_cli_run_composes_paths_and_reports_completion(
     fake = SimpleNamespace(
         run_root=tmp_path / "run", aggregation=SimpleNamespace(global_row_count=7)
     )
-    calls: list[tuple[object, str]] = []
+    calls: list[tuple[object, str, dict[str, object]]] = []
 
-    def fake_run(paths: object, run_id: str) -> object:
-        calls.append((paths, run_id))
+    def fake_run(paths: object, run_id: str, **kwargs: object) -> object:
+        calls.append((paths, run_id, kwargs))
         return fake
 
     monkeypatch.setattr(cli_module, "run_analysis", fake_run)
@@ -96,10 +96,19 @@ def test_cli_run_composes_paths_and_reports_completion(
         raw_pbf_root=source,
         wikidata_root=source,
         website_root=source,
+        workers=3,
+        with_geometry=False,
+        resume=True,
     )
 
     output = capsys.readouterr().out
     assert calls[0][1] == "fixture"
+    assert calls[0][2] == {
+        "batch_rows": 50_000,
+        "resume": True,
+        "scanner": cli_module.scan_pbf_keys,
+        "workers": 3,
+    }
     composed_paths = cast(DataPaths, calls[0][0])
     assert composed_paths.data_root == DEFAULT_DATA_ROOT
     assert composed_paths.raw_pbf_root == source.resolve()
@@ -107,6 +116,37 @@ def test_cli_run_composes_paths_and_reports_completion(
     assert composed_paths.website_root == source.resolve()
     assert "completed run" in output
     assert "7" in output
+
+
+def test_cli_run_can_request_full_geometry_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    fake = SimpleNamespace(
+        run_root=tmp_path / "run", aggregation=SimpleNamespace(global_row_count=7)
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(paths: object, run_id: str, **kwargs: object) -> object:
+        del paths, run_id
+        calls.append(kwargs)
+        return fake
+
+    monkeypatch.setattr(cli_module, "run_analysis", fake_run)
+    cli_module.run_command(
+        run_id="fixture",
+        data_root=DEFAULT_DATA_ROOT,
+        raw_pbf_root=source,
+        wikidata_root=source,
+        website_root=source,
+        workers=3,
+        with_geometry=True,
+        resume=False,
+    )
+
+    assert calls == [{"resume": False, "workers": 3}]
+    assert "completed run" in capsys.readouterr().out
 
 
 def test_cli_paths_forwards_each_explicit_root(tmp_path: Path) -> None:

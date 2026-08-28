@@ -6,6 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import osm_polygon_wikidata_website_coverage.sources._duckdb as duckdb_module
 import osm_polygon_wikidata_website_coverage.sources.website as website_module
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.sources._duckdb import read_only_connection
@@ -156,3 +157,23 @@ def test_read_successful_website_keys_uses_the_exact_polygon_glob(
         OsmIdentity("relation", 2),
     }
     assert calls == [(WEBSITE_SUCCESS_SQL, [str(root / "polygons" / "*.parquet")])]
+
+
+def test_read_only_connection_uses_an_in_memory_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Connection:
+        def close(self) -> None:
+            calls.append({"closed": True})
+
+    def fake_connect(*, database: str) -> Connection:
+        calls.append({"database": database})
+        return Connection()
+
+    monkeypatch.setattr(duckdb_module.duckdb, "connect", fake_connect)
+    with read_only_connection() as connection:
+        assert isinstance(connection, Connection)
+
+    assert calls == [{"database": ":memory:"}, {"closed": True}]

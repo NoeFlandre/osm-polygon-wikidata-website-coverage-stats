@@ -24,11 +24,13 @@ _CATEGORY_LABELS = {
 }
 
 
-def _write_text(path: Path, text: str) -> Path:
+def _write_text(path: Path, text: str, *, replace_existing: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    if path.exists() or temporary.exists():
+    if not replace_existing and (path.exists() or temporary.exists()):
         raise FileExistsError(f"refusing to overwrite report: {path}")
+    if replace_existing:
+        temporary.unlink(missing_ok=True)
     temporary.write_text(text, encoding="utf-8")
     temporary.replace(path)
     return path
@@ -44,7 +46,21 @@ def _category_rows(summary: Mapping[str, Any]) -> list[tuple[str, int, float]]:
     return rows
 
 
-def render_markdown(summary: Mapping[str, Any], output_path: Path) -> Path:
+def _area_lines(summary: Mapping[str, Any]) -> list[str]:
+    return [
+        f"- {name}: {float(value):,.2f} m²"
+        for name, value in summary.get("area_statistics", {}).items()
+        if value is not None
+    ]
+
+
+def _write_report(path: Path, text: str, *, resume: bool) -> Path:
+    if resume:
+        return _write_text(path, text, replace_existing=True)
+    return _write_text(path, text)
+
+
+def render_markdown(summary: Mapping[str, Any], output_path: Path, *, resume: bool = False) -> Path:
     """Write a compact human-readable coverage report."""
 
     total = int(summary["valid_universe_count"])
@@ -74,9 +90,7 @@ def render_markdown(summary: Mapping[str, Any], output_path: Path) -> Path:
         for category, count, percentage in _category_rows(summary)
     )
     lines.extend(["", "## Geometry summary", ""])
-    for name, value in summary.get("area_statistics", {}).items():
-        if value is not None:
-            lines.append(f"- {name}: {float(value):,.2f} m²")
+    lines.extend(_area_lines(summary))
     lines.extend(
         [
             "",
@@ -87,7 +101,7 @@ def render_markdown(summary: Mapping[str, Any], output_path: Path) -> Path:
             "",
         ]
     )
-    return _write_text(output_path, "\n".join(lines))
+    return _write_report(output_path, "\n".join(lines), resume=resume)
 
 
 def _render_coverage_chart(summary: Mapping[str, Any], path: Path) -> None:
@@ -121,15 +135,23 @@ def _render_area_chart(summary: Mapping[str, Any], path: Path) -> None:
     plt.close(figure)
 
 
-def render_reports(summary: Mapping[str, Any], output_root: Path) -> tuple[Path, ...]:
+def render_reports(
+    summary: Mapping[str, Any], output_root: Path, *, resume: bool = False
+) -> tuple[Path, ...]:
     """Write all public report artifacts and return their paths."""
 
     output_root.mkdir(parents=True, exist_ok=True)
-    summary_path = _write_text(
-        output_root / "summary.json",
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
+    summary_text = (
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
     )
-    report_path = render_markdown(summary, output_root / "report.md")
+    if resume:
+        summary_path = _write_text(
+            output_root / "summary.json", summary_text, replace_existing=True
+        )
+        report_path = render_markdown(summary, output_root / "report.md", resume=True)
+    else:
+        summary_path = _write_text(output_root / "summary.json", summary_text)
+        report_path = render_markdown(summary, output_root / "report.md")
     coverage_chart = output_root / "coverage_categories.png"
     area_chart = output_root / "area_distributions.png"
     _render_coverage_chart(summary, coverage_chart)

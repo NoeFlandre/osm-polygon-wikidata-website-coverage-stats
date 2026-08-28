@@ -11,7 +11,7 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
     ci = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     docs = (PROJECT_ROOT / ".github" / "workflows" / "docs.yml").read_text(encoding="utf-8")
 
-    for token in ("uv sync --frozen", "ruff", "ty", "pytest"):
+    for token in ("uv sync --frozen", "ruff", "ty", "pytest", "mkdocs build --strict"):
         assert token in ci
     assert "mkdocs build --strict" in docs
 

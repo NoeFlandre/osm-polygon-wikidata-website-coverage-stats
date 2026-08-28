@@ -14,10 +14,19 @@ from osm_polygon_wikidata_website_coverage.pipeline.aggregate import Aggregation
 from osm_polygon_wikidata_website_coverage.pipeline.extract import ExtractionResult
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
 from osm_polygon_wikidata_website_coverage.pipeline.run import (
+    _file_metadata,
     _generated_artifact_inventory,
     _generated_parquet_inventory,
+    _generated_schema,
+    _require_generated_names,
+    _require_generated_paths,
+    _require_generated_prefix,
+    _schema_matches,
+    _scratch_schema,
     _sha256,
     _source_parquet_inventory,
+    _validate_generated_entry,
+    _validate_generated_inventory,
     _validate_generated_parquets,
     _write_manifest,
     run_analysis,
@@ -163,7 +172,9 @@ def test_run_analysis_writes_complete_manifest_after_all_stages(
         ("website", "polygons/polygons.parquet"),
     ]
     assert all(
-        set(item) == {"path", "size_bytes", "mtime_ns", "source"} for item in source_inventory
+        set(item) == {"path", "size_bytes", "mtime_ns", "sha256", "source"}
+        and len(item["sha256"]) == 64
+        for item in source_inventory
     )
     assert manifest["schema_versions"] == {
         "occurrences": "1",
@@ -221,15 +232,65 @@ def test_run_analysis_writes_complete_manifest_after_all_stages(
     )
     assert result.manifest_path.name == "manifest.json"
 
-    def default_scanner_extraction(paths: DataPaths, run_id: str, **kwargs: int) -> object:
-        assert kwargs == {"batch_rows": 1}
+    def default_scanner_extraction(
+        paths: DataPaths, run_id: str, *, batch_rows: int, workers: int
+    ) -> object:
+        assert {"batch_rows": batch_rows, "workers": workers} == {
+            "batch_rows": 1,
+            "workers": 1,
+        }
         from osm_polygon_wikidata_website_coverage.pipeline.extract import extract_all
 
-        return extract_all(paths, run_id, scanner=scanner, **kwargs)
+        return extract_all(paths, run_id, scanner=scanner, batch_rows=batch_rows, workers=workers)
 
     monkeypatch.setattr(run_module, "extract_all", default_scanner_extraction)
     default_result = run_analysis(paths, "default-scanner", batch_rows=1)
     assert default_result.aggregation.global_row_count == 1
+
+    generated = _generated_parquet_inventory(result.run_root)
+    without_occurrences = [
+        item for item in generated if not item["path"].startswith("occurrences/")
+    ]
+    with pytest.raises(RuntimeError, match="occurrence Parquets"):
+        _validate_generated_parquets(without_occurrences, result.run_root)
+    without_failures = [
+        item for item in generated if not item["path"].startswith("geometry-failures/")
+    ]
+    with pytest.raises(RuntimeError, match="geometry-failure Parquets"):
+        _validate_generated_parquets(without_failures, result.run_root)
+
+    extra_global = result.run_root / "coverage" / "global" / "shard-64.parquet"
+    extra_global.write_bytes(
+        (result.run_root / "coverage" / "global" / "shard-00.parquet").read_bytes()
+    )
+    with pytest.raises(RuntimeError, match="64-file set"):
+        _validate_generated_parquets(_generated_parquet_inventory(result.run_root), result.run_root)
+    extra_global.unlink()
+
+    extra_member = result.run_root / "members" / "extra.parquet"
+    extra_member.write_bytes((result.run_root / "members" / "website.parquet").read_bytes())
+    with pytest.raises(RuntimeError, match="three-file set"):
+        _validate_generated_parquets(_generated_parquet_inventory(result.run_root), result.run_root)
+    extra_member.unlink()
+
+    original_parquet_file = run_module.pq.ParquetFile
+
+    def inflated_metadata(path: Path) -> object:
+        parquet_file = original_parquet_file(path)
+        if path.name != "global_compact.parquet":
+            return parquet_file
+
+        class Metadata:
+            num_rows = parquet_file.metadata.num_rows + 1
+
+        class ParquetFile:
+            metadata = Metadata()
+
+        return ParquetFile()
+
+    monkeypatch.setattr(run_module.pq, "ParquetFile", inflated_metadata)
+    with pytest.raises(RuntimeError, match="compact row count"):
+        _validate_generated_parquets(generated, result.run_root)
 
 
 def test_run_helpers_reject_invalid_generated_metadata_and_existing_manifest(
@@ -257,6 +318,10 @@ def test_run_helpers_reject_invalid_generated_metadata_and_existing_manifest(
     with pytest.raises(FileExistsError, match="completion manifest"):
         _write_manifest(manifest_root.parent, {"status": "complete"})
 
+    temporary.unlink()
+    _write_manifest(manifest_root.parent, {"status": "resumed"}, replace_existing=True)
+    assert json.loads(manifest.read_text(encoding="utf-8")) == {"status": "resumed"}
+
 
 def test_run_helpers_preserve_hash_chunking_and_inventory_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -272,12 +337,14 @@ def test_run_helpers_preserve_hash_chunking_and_inventory_contracts(
             "path": "fixture.parquet",
             "size_bytes": 6,
             "mtime_ns": source_file.stat().st_mtime_ns,
+            "sha256": hashlib.sha256(b"source").hexdigest(),
             "source": "wikidata",
         },
         {
             "path": "fixture.parquet",
             "size_bytes": 6,
             "mtime_ns": source_file.stat().st_mtime_ns,
+            "sha256": hashlib.sha256(b"source").hexdigest(),
             "source": "website",
         },
     ]
@@ -321,6 +388,201 @@ def test_run_helpers_preserve_hash_chunking_and_inventory_contracts(
     assert _sha256(tmp_path / "fixture") == hashlib.sha256(b"abc").hexdigest()
     assert stream.read_sizes == [8 * 1024 * 1024, 8 * 1024 * 1024]
 
+    assert _file_metadata(source_file, relative_to=source, include_hash=False) == {
+        "path": "fixture.parquet",
+        "size_bytes": 6,
+        "mtime_ns": source_file.stat().st_mtime_ns,
+    }
+
+
+def test_generated_validation_rejects_missing_files_and_schema_mismatches(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="required generated Parquets"):
+        _validate_generated_parquets([], tmp_path)
+
+    unknown = tmp_path / "unknown.parquet"
+    pq.write_table(pa.table({"value": [1]}), unknown)
+    with pytest.raises(RuntimeError, match="unexpected generated Parquet"):
+        _validate_generated_parquets([{"path": "unknown.parquet"}], tmp_path)
+
+    mismatch = tmp_path / "coverage" / "global" / "shard-00.parquet"
+    mismatch.parent.mkdir(parents=True)
+    pq.write_table(pa.table({"osm_type": ["way"]}), mismatch)
+    with pytest.raises(RuntimeError, match="schema mismatch"):
+        _validate_generated_parquets([{"path": "coverage/global/shard-00.parquet"}], tmp_path)
+
+
+def _valid_generated_inventory() -> dict[str, int]:
+    paths = {
+        "coverage/by-pbf/by-pbf.parquet",
+        "scratch/global_compact.parquet",
+        "members/website.parquet",
+        "members/wikipedia.parquet",
+        "members/wikivoyage.parquet",
+        "occurrences/rows.parquet",
+        "geometry-failures/rows.parquet",
+        "summaries/global.parquet",
+        "summaries/by-source-pbf.parquet",
+        "summaries/by-region.parquet",
+        "summaries/by-source-pbf-metrics.parquet",
+        "summaries/by-region-metrics.parquet",
+        "summaries/by-overlap.parquet",
+        "summaries/geometry-failures.parquet",
+        "summaries/conflicts.parquet",
+    }
+    paths.update(f"coverage/global/shard-{index:02d}.parquet" for index in range(64))
+    return {path: 0 for path in paths}
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "coverage/by-pbf/by-pbf.parquet",
+        "scratch/global_compact.parquet",
+        "members/website.parquet",
+        "members/wikipedia.parquet",
+        "members/wikivoyage.parquet",
+        "summaries/global.parquet",
+        "summaries/by-source-pbf.parquet",
+        "summaries/by-region.parquet",
+        "summaries/by-source-pbf-metrics.parquet",
+        "summaries/by-region-metrics.parquet",
+        "summaries/by-overlap.parquet",
+        "summaries/geometry-failures.parquet",
+        "summaries/conflicts.parquet",
+        "coverage/global/shard-00.parquet",
+        "coverage/global/shard-63.parquet",
+    ],
+)
+def test_generated_inventory_requires_each_fixed_artifact(missing: str) -> None:
+    validated = _valid_generated_inventory()
+    validated.pop(missing)
+
+    with pytest.raises(RuntimeError) as error:
+        _validate_generated_inventory(validated)
+    assert str(error.value) == f"required generated Parquets are missing: {missing}"
+
+
+def test_generated_inventory_requires_occurrences_and_failures_and_exact_sets() -> None:
+    validated = _valid_generated_inventory()
+    validated.pop("occurrences/rows.parquet")
+    with pytest.raises(RuntimeError) as occurrence_error:
+        _validate_generated_inventory(validated)
+    assert str(occurrence_error.value) == "generated occurrence Parquets are missing"
+
+    validated = _valid_generated_inventory()
+    validated.pop("geometry-failures/rows.parquet")
+    with pytest.raises(RuntimeError) as failure_error:
+        _validate_generated_inventory(validated)
+    assert str(failure_error.value) == "generated geometry-failure Parquets are missing"
+
+    validated = _valid_generated_inventory()
+    validated["coverage/global/extra.parquet"] = 0
+    with pytest.raises(RuntimeError) as global_set_error:
+        _validate_generated_inventory(validated)
+    assert str(global_set_error.value) == (
+        "generated global Parquet shards are not the approved 64-file set"
+    )
+
+    validated = _valid_generated_inventory()
+    validated["members/extra.parquet"] = 0
+    with pytest.raises(RuntimeError) as member_set_error:
+        _validate_generated_inventory(validated)
+    assert str(member_set_error.value) == (
+        "generated membership Parquets are not the approved three-file set"
+    )
+
+
+def test_generated_inventory_checks_global_rows_against_compact_rows() -> None:
+    validated = _valid_generated_inventory()
+    validated["coverage/global/shard-00.parquet"] = 1
+
+    with pytest.raises(RuntimeError) as error:
+        _validate_generated_inventory(validated)
+    assert str(error.value) == "global shard row count does not match the compact row count"
+
+    validated["scratch/global_compact.parquet"] = 1
+    _validate_generated_inventory(validated)
+
+
+def test_generated_inventory_helpers_have_exact_prefix_and_name_contracts() -> None:
+    validated = {"occurrences/rows.parquet": 0}
+    _require_generated_prefix(validated, "occurrences/", "missing")
+    with pytest.raises(RuntimeError, match="missing"):
+        _require_generated_prefix({}, "occurrences/", "missing")
+
+    _require_generated_names(
+        {"coverage/global/shard-00.parquet": 0},
+        "coverage/global/",
+        {"shard-00.parquet"},
+        "wrong names",
+    )
+    with pytest.raises(RuntimeError, match="wrong names"):
+        _require_generated_names(
+            {"coverage/global/shard-01.parquet": 0},
+            "coverage/global/",
+            {"shard-00.parquet"},
+            "wrong names",
+        )
+    _require_generated_paths(validated, {"occurrences/rows.parquet"})
+    with pytest.raises(RuntimeError) as error:
+        _require_generated_paths({}, {"occurrences/rows.parquet", "scratch/global_compact.parquet"})
+    assert str(error.value) == (
+        "required generated Parquets are missing: occurrences/rows.parquet, "
+        "scratch/global_compact.parquet"
+    )
+
+
+def test_generated_schema_and_schema_match_helpers_are_exact() -> None:
+    expected = {
+        "coverage/global": pa.schema([pa.field("value", pa.int64())]),
+        "exact.parquet": pa.schema([pa.field("exact", pa.string())]),
+    }
+    assert _generated_schema("exact.parquet", expected) == expected["exact.parquet"]
+    assert (
+        _generated_schema("coverage/global/shard-00.parquet", expected)
+        == expected["coverage/global"]
+    )
+    assert _generated_schema("unknown.parquet", expected) is None
+
+    schema = pa.schema([pa.field("value", pa.int64())])
+    assert _schema_matches(schema, schema)
+    assert not _schema_matches(schema, pa.schema([pa.field("other", pa.int64())]))
+    assert not _schema_matches(schema, pa.schema([pa.field("value", pa.string())]))
+    assert _scratch_schema() == pa.schema(
+        [*run_module.COMPACT_GLOBAL_SCHEMA, pa.field("shard_id", pa.uint64())]
+    )
+
+
+def test_validate_generated_entry_checks_positive_rows_and_exact_error_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "coverage" / "global" / "shard-00.parquet"
+    path.parent.mkdir(parents=True)
+    row = {field.name: None for field in run_module.COMPACT_GLOBAL_SCHEMA}
+    row.update({"osm_type": "way", "osm_id": 1})
+    pq.write_table(pa.Table.from_pylist([row], schema=run_module.COMPACT_GLOBAL_SCHEMA), path)
+    relative, count = _validate_generated_entry(
+        {"path": "coverage/global/shard-00.parquet"},
+        tmp_path,
+        {"coverage/global": run_module.COMPACT_GLOBAL_SCHEMA},
+    )
+    assert (relative, count) == ("coverage/global/shard-00.parquet", 1)
+
+    class NegativeMetadata:
+        num_rows = -1
+
+    class NegativeParquetFile:
+        metadata = NegativeMetadata()
+
+    monkeypatch.setattr(run_module.pq, "ParquetFile", lambda value: NegativeParquetFile())
+    with pytest.raises(RuntimeError) as error:
+        _validate_generated_entry(
+            {"path": "coverage/global/shard-00.parquet"},
+            tmp_path,
+            {"coverage/global": run_module.COMPACT_GLOBAL_SCHEMA},
+        )
+    assert str(error.value) == f"invalid generated Parquet metadata: {path}"
+
 
 def test_manifest_writer_is_nested_sorted_utf8_and_newline_terminated(tmp_path: Path) -> None:
     run_root = tmp_path / "one" / "two" / "run"
@@ -355,7 +617,7 @@ def test_run_analysis_default_contract_uses_five_thousand_rows() -> None:
     assert inspect.signature(run_analysis).parameters["batch_rows"].default == 5_000
 
 
-def test_source_inventory_requests_metadata_without_hashes(
+def test_source_inventory_requests_metadata_with_hashes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wikidata = tmp_path / "wikidata"
@@ -380,8 +642,8 @@ def test_source_inventory_requests_metadata_without_hashes(
         {"path": "s.parquet", "source": "website"},
     ]
     assert metadata_calls == [
-        (wikidata_file, wikidata, False),
-        (website_file, website, False),
+        (wikidata_file, wikidata, True),
+        (website_file, website, True),
     ]
 
 
@@ -438,23 +700,27 @@ def test_run_analysis_passes_exact_stage_roots_and_returns_all_results(
         calls["extract"] = (paths_arg, run_id_arg, kwargs)
         return extraction
 
-    def fake_membership(paths_arg: DataPaths, run_root_arg: Path) -> MembershipResult:
-        calls["membership"] = (paths_arg, run_root_arg)
+    def fake_membership(
+        paths_arg: DataPaths, run_root_arg: Path, *, resume: bool = False
+    ) -> MembershipResult:
+        calls["membership"] = (paths_arg, run_root_arg, resume)
         return membership
 
     def fake_aggregate(**kwargs: object) -> AggregationResult:
         calls["aggregate"] = kwargs
         return aggregation
 
-    def fake_render(summary: dict[str, object], report_root: Path) -> None:
-        calls["render"] = (summary, report_root)
+    def fake_render(summary: dict[str, object], report_root: Path, *, resume: bool = False) -> None:
+        calls["render"] = (summary, report_root, resume)
 
     def fake_manifest_payload(**kwargs: object) -> dict[str, object]:
         calls["payload"] = kwargs
         return {"status": "complete"}
 
-    def fake_write_manifest(run_root_arg: Path, payload: dict[str, object]) -> Path:
-        calls["manifest"] = (run_root_arg, payload)
+    def fake_write_manifest(
+        run_root_arg: Path, payload: dict[str, object], *, replace_existing: bool = False
+    ) -> Path:
+        calls["manifest"] = (run_root_arg, payload, replace_existing)
         return run_root_arg / "manifests" / "manifest.json"
 
     monkeypatch.setattr(run_module, "extract_all", fake_extract)
@@ -467,21 +733,42 @@ def test_run_analysis_passes_exact_stage_roots_and_returns_all_results(
     monkeypatch.setattr(run_module, "_manifest_payload", fake_manifest_payload)
     monkeypatch.setattr(run_module, "_write_manifest", fake_write_manifest)
 
-    result = run_analysis(paths, "fixture", scanner=scanner, batch_rows=17)
+    result = run_analysis(paths, "fixture", scanner=scanner, batch_rows=17, workers=3)
 
-    assert calls["extract"] == (paths, "fixture", {"batch_rows": 17, "scanner": scanner})
-    assert calls["membership"] == (paths, run_root)
+    assert calls["extract"] == (
+        paths,
+        "fixture",
+        {"batch_rows": 17, "scanner": scanner, "workers": 3},
+    )
+    assert calls["membership"] == (paths, run_root, False)
     assert calls["aggregate"] == {
         "occurrence_root": run_root / "occurrences",
         "membership_root": run_root / "members",
         "output_root": run_root,
     }
-    assert calls["render"] == ({}, run_root / "reports")
-    assert calls["manifest"] == (run_root, {"status": "complete"})
+    assert calls["render"] == ({}, run_root / "reports", False)
+    assert calls["manifest"] == (run_root, {"status": "complete"}, False)
     assert result == run_module.RunResult(
         run_root, extraction, membership, aggregation, run_root / "manifests" / "manifest.json"
     )
 
     calls.clear()
     run_analysis(paths, "default-batch")
-    assert calls["extract"] == (paths, "default-batch", {"batch_rows": 5_000})
+    assert calls["extract"] == (paths, "default-batch", {"batch_rows": 5_000, "workers": 1})
+
+    calls.clear()
+    run_analysis(paths, "resumed", scanner=scanner, batch_rows=17, workers=3, resume=True)
+    assert calls["extract"] == (
+        paths,
+        "resumed",
+        {"batch_rows": 17, "scanner": scanner, "workers": 3, "resume": True},
+    )
+    assert calls["membership"] == (paths, run_root, True)
+    assert calls["aggregate"] == {
+        "occurrence_root": run_root / "occurrences",
+        "membership_root": run_root / "members",
+        "output_root": run_root,
+        "resume": True,
+    }
+    assert calls["render"] == ({}, run_root / "reports", True)
+    assert calls["manifest"] == (run_root, {"status": "complete"}, True)

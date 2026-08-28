@@ -39,6 +39,10 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/osm_polygon_wikidata_website_coverage"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"LICENSE" = "osm_polygon_wikidata_website_coverage/LICENSE"
+"CITATION.cff" = "osm_polygon_wikidata_website_coverage/CITATION.cff"
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]

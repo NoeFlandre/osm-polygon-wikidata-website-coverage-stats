@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,11 +14,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.domain.coverage import EXPECTED_OVERLAP_CATEGORIES
+from osm_polygon_wikidata_website_coverage.io.parquet import OCCURRENCE_SCHEMA
 
 EXPECTED_GLOBAL_COLUMNS = (
     "osm_type",
     "osm_id",
     "source_pbf",
+    "contributing_pbf_count",
     "source_pbfs",
     "region",
     "osm_version",
@@ -38,6 +41,50 @@ EXPECTED_GLOBAL_COLUMNS = (
     "wikivoyage",
     "covered_by_any_text",
     "overlap_category",
+)
+
+COMPACT_GLOBAL_SCHEMA = pa.schema(
+    [
+        pa.field("osm_type", pa.string()),
+        pa.field("osm_id", pa.int64()),
+        pa.field("source_pbf", pa.string()),
+        pa.field("contributing_pbf_count", pa.int64()),
+        pa.field("source_pbfs", pa.string()),
+        pa.field("region", pa.string()),
+        pa.field("osm_version", pa.int64()),
+        pa.field("osm_timestamp", pa.string()),
+        pa.field("relation_kind", pa.string()),
+        pa.field("geometry_type", pa.string()),
+        pa.field("centroid_lon", pa.float64()),
+        pa.field("centroid_lat", pa.float64()),
+        pa.field("bbox_min_lon", pa.float64()),
+        pa.field("bbox_min_lat", pa.float64()),
+        pa.field("bbox_max_lon", pa.float64()),
+        pa.field("bbox_max_lat", pa.float64()),
+        pa.field("area_m2", pa.float64()),
+        pa.field("area_bucket", pa.string()),
+        pa.field("geometry_hash", pa.string()),
+        pa.field("website", pa.bool_()),
+        pa.field("wikipedia", pa.bool_()),
+        pa.field("wikivoyage", pa.bool_()),
+        pa.field("covered_by_any_text", pa.bool_()),
+        pa.field("overlap_category", pa.string()),
+    ]
+)
+BY_PBF_SCHEMA = pa.schema(
+    [
+        pa.field("source_pbf", pa.string()),
+        pa.field("osm_type", pa.string()),
+        pa.field("osm_id", pa.int64()),
+        pa.field("region", pa.string()),
+        pa.field("geometry_type", pa.string()),
+        pa.field("area_m2", pa.float64()),
+        pa.field("website", pa.bool_()),
+        pa.field("wikipedia", pa.bool_()),
+        pa.field("wikivoyage", pa.bool_()),
+        pa.field("covered_by_any_text", pa.bool_()),
+        pa.field("overlap_category", pa.string()),
+    ]
 )
 
 GLOBAL_SUMMARY_SCHEMA = pa.schema(
@@ -69,6 +116,7 @@ GROUP_SUMMARY_SCHEMA = pa.schema(
         pa.field("covered_by_any_text_rate", pa.float64()),
     ]
 )
+GROUP_METRIC_SCHEMA = GLOBAL_SUMMARY_SCHEMA
 FAILURE_SUMMARY_SCHEMA = pa.schema(
     [
         pa.field("candidate_kind", pa.string()),
@@ -86,6 +134,9 @@ CONFLICT_SCHEMA = pa.schema(
     ]
 )
 
+_SHARD_COUNT = 64
+_SHARD_EXPRESSION = "hash(osm_type || ':' || CAST(osm_id AS VARCHAR)) % 64"
+
 _GLOBAL_SQL = """
 WITH occurrence_rows AS (
     SELECT * FROM read_parquet(?, union_by_name = true)
@@ -99,7 +150,8 @@ WITH occurrence_rows AS (
     SELECT * FROM ranked WHERE occurrence_rank = 1
 ), source_lists AS (
     SELECT osm_type, osm_id,
-           CAST(to_json(list(source_pbf ORDER BY source_pbf)) AS VARCHAR) AS source_pbfs
+           COUNT(DISTINCT source_pbf) AS contributing_pbf_count,
+           CAST(to_json(list(DISTINCT source_pbf ORDER BY source_pbf)) AS VARCHAR) AS source_pbfs
     FROM occurrence_rows
     GROUP BY osm_type, osm_id
 ), website AS (
@@ -113,6 +165,7 @@ SELECT
     canonical.osm_type,
     canonical.osm_id,
     canonical.source_pbf,
+    source_lists.contributing_pbf_count,
     source_lists.source_pbfs,
     canonical.region,
     canonical.osm_version,
@@ -228,6 +281,11 @@ LEFT JOIN wikivoyage USING (osm_type, osm_id)
 WHERE source_rows.occurrence_rank = 1
 """
 
+_COMPACT_FROM_GLOBAL_SQL = f"""
+SELECT *, {_SHARD_EXPRESSION} AS shard_id
+FROM read_parquet(?, union_by_name = true)
+"""
+
 _GROUP_METRICS = (
     "website_count",
     "wikipedia_count",
@@ -268,11 +326,15 @@ def _copy_query(
     query: str,
     parameters: list[Any],
     output_path: Path,
+    *,
+    replace_existing: bool = False,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.tmp")
-    if output_path.exists() or temporary.exists():
+    if not replace_existing and (output_path.exists() or temporary.exists()):
         raise FileExistsError(f"refusing to overwrite aggregate output: {output_path}")
+    if replace_existing:
+        temporary.unlink(missing_ok=True)
     connection.execute(
         f"COPY ({query}) TO {_sql_literal(temporary)} (FORMAT PARQUET, COMPRESSION ZSTD)",
         parameters,
@@ -431,6 +493,108 @@ def _membership_paths(root: Path) -> tuple[Path, Path, Path]:
     return paths
 
 
+def _remove_directory(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _duckdb_spill_directory(target: Path) -> Path:
+    return target / "scratch" / "duckdb-temp"
+
+
+def _aggregation_bucket_directory(target: Path) -> Path:
+    return target / "scratch" / "occurrence-buckets"
+
+
+def _aggregation_bucket_temporary_directory(target: Path) -> Path:
+    return target / "scratch" / ".occurrence-buckets.tmp"
+
+
+def _aggregation_global_part(target: Path) -> Path:
+    return target / "scratch" / "global_shard.parquet"
+
+
+def _cleanup_duckdb_spill(target: Path) -> None:
+    _remove_directory(_duckdb_spill_directory(target))
+
+
+def _cleanup_aggregation_temporary(target: Path) -> None:
+    _cleanup_duckdb_spill(target)
+    _remove_directory(_aggregation_bucket_directory(target))
+    _remove_directory(_aggregation_bucket_temporary_directory(target))
+    global_part = _aggregation_global_part(target)
+    global_part.unlink(missing_ok=True)
+    global_part.with_name(f".{global_part.name}.tmp").unlink(missing_ok=True)
+    (target / "scratch" / ".global_compact.parquet.tmp").unlink(missing_ok=True)
+
+
+def _prepare_bucket_directories(output_root: Path, *, replace_existing: bool) -> tuple[Path, Path]:
+    scratch = _aggregation_bucket_directory(output_root).parent
+    scratch.mkdir(parents=True, exist_ok=True)
+    bucket_root = _aggregation_bucket_directory(output_root)
+    temporary = _aggregation_bucket_temporary_directory(output_root)
+    if replace_existing:
+        _remove_directory(bucket_root)
+        _remove_directory(temporary)
+    elif bucket_root.exists() or temporary.exists():
+        raise FileExistsError(f"refusing to overwrite aggregate buckets: {bucket_root}")
+    return bucket_root, temporary
+
+
+def _write_partitioned_occurrences(
+    connection: duckdb.DuckDBPyConnection, occurrence_root: Path, temporary: Path
+) -> None:
+    connection.execute(
+        f"COPY (SELECT *, {_SHARD_EXPRESSION} AS shard_id "
+        f"FROM read_parquet(?, union_by_name = true)) "
+        f"TO {_sql_literal(temporary)} "
+        "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (shard_id))",
+        [str(occurrence_root / "*.parquet")],
+    )
+
+
+def _ensure_empty_buckets(temporary: Path) -> None:
+    for shard_id in range(_SHARD_COUNT):
+        bucket = temporary / f"shard_id={shard_id}"
+        bucket.mkdir(parents=True, exist_ok=True)
+        if not any(bucket.glob("*.parquet")):
+            _write_rows(bucket / "empty.parquet", OCCURRENCE_SCHEMA, [])
+
+
+def _partition_occurrences(
+    connection: duckdb.DuckDBPyConnection,
+    occurrence_root: Path,
+    output_root: Path,
+    *,
+    replace_existing: bool = False,
+) -> Path:
+    """Partition raw occurrences once so each global shard has a bounded join."""
+
+    bucket_root, temporary = _prepare_bucket_directories(
+        output_root, replace_existing=replace_existing
+    )
+    try:
+        _write_partitioned_occurrences(connection, occurrence_root, temporary)
+        _ensure_empty_buckets(temporary)
+        temporary.replace(bucket_root)
+    except BaseException:
+        _remove_directory(temporary)
+        raise
+    return bucket_root
+
+
+def _configure_connection(connection: duckdb.DuckDBPyConnection, target: Path) -> None:
+    """Keep DuckDB spill files with the run and bound resource fan-out."""
+
+    _cleanup_aggregation_temporary(target)
+    temp_directory = _duckdb_spill_directory(target)
+    temp_directory.mkdir(parents=True, exist_ok=True)
+    connection.execute(f"SET temp_directory = {_sql_literal(temp_directory)}")
+    connection.execute("SET preserve_insertion_order = false")
+    connection.execute("SET threads = 4")
+    connection.execute("SET max_temp_directory_size = '100GB'")
+
+
 def _global_parameters(occurrence_root: Path, members: tuple[Path, Path, Path]) -> list[str]:
     return [str(occurrence_root / "*.parquet"), *(str(path) for path in members)]
 
@@ -440,28 +604,57 @@ def _materialize_global(
     occurrence_root: Path,
     members: tuple[Path, Path, Path],
     output_root: Path,
+    *,
+    replace_existing: bool = False,
 ) -> tuple[tuple[Path, ...], Path, int]:
     scratch = output_root / "scratch"
     compact = scratch / "global_compact.parquet"
-    parameters = _global_parameters(occurrence_root, members)
-    _copy_query(connection, _GLOBAL_SQL, parameters, compact)
     global_root = output_root / "coverage" / "global"
-    shard_rows = connection.execute(
-        "SELECT DISTINCT shard_id FROM read_parquet(?) ORDER BY shard_id", [str(compact)]
-    ).fetchall()
+    bucket_root = _partition_occurrences(
+        connection,
+        occurrence_root,
+        output_root,
+        replace_existing=replace_existing,
+    )
+    global_part = _aggregation_global_part(output_root)
     global_paths: list[Path] = []
     columns = ", ".join(EXPECTED_GLOBAL_COLUMNS)
-    for (shard_id,) in shard_rows:
-        output = global_root / f"shard-{int(shard_id):02d}.parquet"
+    shard_query = "SELECT " + columns
+    shard_query += " FROM read_parquet(?) WHERE shard_id = ?"
+    shard_query += " ORDER BY osm_type, osm_id"
+    try:
+        for shard_id in range(_SHARD_COUNT):
+            bucket = bucket_root / f"shard_id={shard_id}"
+            _copy_query(
+                connection,
+                _GLOBAL_SQL,
+                _global_parameters(bucket, members),
+                global_part,
+                replace_existing=True,
+            )
+            output = global_root / f"shard-{shard_id:02d}.parquet"
+            _copy_query(
+                connection,
+                shard_query,
+                [str(global_part), shard_id],
+                output,
+                replace_existing=replace_existing,
+            )
+            global_paths.append(output)
         _copy_query(
             connection,
-            f"SELECT {columns} FROM read_parquet(?) WHERE shard_id = ? ORDER BY osm_type, osm_id",
-            [str(compact), int(shard_id)],
-            output,
+            _COMPACT_FROM_GLOBAL_SQL,
+            [str(global_root / "*.parquet")],
+            compact,
+            replace_existing=replace_existing,
         )
-        global_paths.append(output)
-    row_count = _fetch_count(connection, "SELECT COUNT(*) FROM read_parquet(?)", [str(compact)])
-    return tuple(global_paths), compact, row_count
+        row_count = _fetch_count(connection, "SELECT COUNT(*) FROM read_parquet(?)", [str(compact)])
+        return tuple(global_paths), compact, row_count
+    finally:
+        global_part.unlink(missing_ok=True)
+        global_part.with_name(f".{global_part.name}.tmp").unlink(missing_ok=True)
+        _remove_directory(bucket_root)
+        _remove_directory(_aggregation_bucket_temporary_directory(output_root))
 
 
 def _materialize_by_pbf(
@@ -469,14 +662,25 @@ def _materialize_by_pbf(
     occurrence_root: Path,
     members: tuple[Path, Path, Path],
     output_root: Path,
+    *,
+    replace_existing: bool = False,
 ) -> Path:
     output = output_root / "coverage" / "by-pbf" / "by-pbf.parquet"
-    _copy_query(
-        connection,
-        _BY_PBF_SQL,
-        _global_parameters(occurrence_root, members),
-        output,
-    )
+    if replace_existing:
+        _copy_query(
+            connection,
+            _BY_PBF_SQL,
+            _global_parameters(occurrence_root, members),
+            output,
+            replace_existing=True,
+        )
+    else:
+        _copy_query(
+            connection,
+            _BY_PBF_SQL,
+            _global_parameters(occurrence_root, members),
+            output,
+        )
     return output
 
 
@@ -542,11 +746,204 @@ def _group_rows(
     ]
 
 
-def _write_rows(path: Path, schema: pa.Schema, rows: list[dict[str, Any]]) -> None:
+def _group_base_rows(
+    connection: duckdb.DuckDBPyConnection, table: Path, group_column: str
+) -> list[tuple[Any, ...]]:
+    return connection.execute(
+        f"""
+        SELECT
+            {group_column} AS group_name,
+            COUNT(*) AS valid_polygon_count,
+            SUM(CASE WHEN website THEN 1 ELSE 0 END) AS website_count,
+            SUM(CASE WHEN wikipedia THEN 1 ELSE 0 END) AS wikipedia_count,
+            SUM(CASE WHEN wikivoyage THEN 1 ELSE 0 END) AS wikivoyage_count,
+            SUM(CASE WHEN covered_by_any_text THEN 1 ELSE 0 END) AS covered_by_any_text_count
+        FROM read_parquet(?)
+        GROUP BY {group_column}
+        ORDER BY group_name
+        """,
+        [str(table)],
+    ).fetchall()
+
+
+def _group_fixed_metric_rows(base_rows: list[tuple[Any, ...]], scope: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for group, total, website, wikipedia, wikivoyage, covered in base_rows:
+        name = str(group)
+        total_count = int(total)
+        counts = {
+            "valid_polygon_count": total_count,
+            "website_count": int(website),
+            "wikipedia_count": int(wikipedia),
+            "wikivoyage_count": int(wikivoyage),
+            "covered_by_any_text_count": int(covered),
+        }
+        result.extend(
+            {
+                "scope": scope,
+                "group_name": name,
+                "metric": metric,
+                "value": float(value),
+            }
+            for metric, value in counts.items()
+        )
+        result.extend(
+            {
+                "scope": scope,
+                "group_name": name,
+                "metric": f"{metric.removesuffix('_count')}_rate",
+                "value": _rate(value, total_count),
+            }
+            for metric, value in counts.items()
+            if metric != "valid_polygon_count"
+        )
+    return result
+
+
+def _group_overlap_metric_rows(
+    connection: duckdb.DuckDBPyConnection,
+    table: Path,
+    group_column: str,
+    scope: str,
+    totals: Mapping[str, int],
+) -> list[dict[str, Any]]:
+    overlap_rows = connection.execute(
+        f"""
+        SELECT {group_column} AS group_name, overlap_category, COUNT(*)
+        FROM read_parquet(?)
+        GROUP BY {group_column}, overlap_category
+        ORDER BY group_name, overlap_category
+        """,
+        [str(table)],
+    ).fetchall()
+    counts = {(str(group), str(category)): int(count) for group, category, count in overlap_rows}
+    result: list[dict[str, Any]] = []
+    for group_name in totals:
+        for category_name in EXPECTED_OVERLAP_CATEGORIES:
+            count = counts.get((group_name, category_name), 0)
+            result.extend(
+                (
+                    {
+                        "scope": scope,
+                        "group_name": group_name,
+                        "metric": f"overlap_count:{category_name}",
+                        "value": float(count),
+                    },
+                    {
+                        "scope": scope,
+                        "group_name": group_name,
+                        "metric": f"overlap_rate:{category_name}",
+                        "value": _rate(count, totals[group_name]),
+                    },
+                )
+            )
+    return result
+
+
+def _group_area_metric_rows(
+    connection: duckdb.DuckDBPyConnection,
+    table: Path,
+    group_column: str,
+    scope: str,
+) -> list[dict[str, Any]]:
+    area_rows = connection.execute(
+        f"""
+        SELECT {group_column} AS group_name,
+               SUM(area_m2), MIN(area_m2), MAX(area_m2), AVG(area_m2),
+               MEDIAN(area_m2), QUANTILE_CONT(area_m2, 0.25),
+               QUANTILE_CONT(area_m2, 0.75), QUANTILE_CONT(area_m2, 0.95)
+        FROM read_parquet(?)
+        GROUP BY {group_column}
+        ORDER BY group_name
+        """,
+        [str(table)],
+    ).fetchall()
+    area_names = (
+        "area_total_m2",
+        "area_min_m2",
+        "area_max_m2",
+        "area_mean_m2",
+        "area_median_m2",
+        "area_p25_m2",
+        "area_p75_m2",
+        "area_p95_m2",
+    )
+    result: list[dict[str, Any]] = []
+    for row in area_rows:
+        result.extend(
+            {
+                "scope": scope,
+                "group_name": str(row[0]),
+                "metric": metric,
+                "value": float(value),
+            }
+            for metric, value in zip(area_names, row[1:], strict=True)
+            if value is not None
+        )
+    return result
+
+
+def _group_type_metric_rows(
+    connection: duckdb.DuckDBPyConnection,
+    table: Path,
+    group_column: str,
+    scope: str,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for column, prefix in (
+        ("osm_type", "osm_type_count"),
+        ("geometry_type", "geometry_type_count"),
+    ):
+        type_rows = connection.execute(
+            f"""
+            SELECT {group_column} AS group_name, {column}, COUNT(*)
+            FROM read_parquet(?)
+            GROUP BY {group_column}, {column}
+            ORDER BY group_name, {column}
+            """,
+            [str(table)],
+        ).fetchall()
+        result.extend(
+            {
+                "scope": scope,
+                "group_name": str(group),
+                "metric": f"{prefix}:{kind}",
+                "value": float(count),
+            }
+            for group, kind, count in type_rows
+        )
+    return result
+
+
+def _group_metric_rows(
+    connection: duckdb.DuckDBPyConnection,
+    table: Path,
+    group_column: str,
+    scope: str,
+) -> list[dict[str, Any]]:
+    base_rows = _group_base_rows(connection, table, group_column)
+    totals = {str(group): int(total) for group, total, *_ in base_rows}
+    return [
+        *_group_fixed_metric_rows(base_rows, scope),
+        *_group_overlap_metric_rows(connection, table, group_column, scope, totals),
+        *_group_area_metric_rows(connection, table, group_column, scope),
+        *_group_type_metric_rows(connection, table, group_column, scope),
+    ]
+
+
+def _write_rows(
+    path: Path,
+    schema: pa.Schema,
+    rows: list[dict[str, Any]],
+    *,
+    replace_existing: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    if path.exists() or temporary.exists():
+    if not replace_existing and (path.exists() or temporary.exists()):
         raise FileExistsError(f"refusing to overwrite summary output: {path}")
+    if replace_existing:
+        temporary.unlink(missing_ok=True)
     pq.write_table(pa.Table.from_pylist(rows, schema=schema), temporary, compression="zstd")
     os.replace(temporary, path)
 
@@ -636,26 +1033,72 @@ def _write_summary_outputs(
     output_root: Path,
     summary: dict[str, Any],
     occurrence_root: Path,
+    *,
+    replace_existing: bool = False,
 ) -> tuple[Path, ...]:
+    def write_rows(path: Path, schema: pa.Schema, rows: list[dict[str, Any]]) -> None:
+        if replace_existing:
+            _write_rows(path, schema, rows, replace_existing=True)
+        else:
+            _write_rows(path, schema, rows)
+
     summaries_root = output_root / "summaries"
     global_summary = summaries_root / "global.parquet"
-    _write_rows(global_summary, GLOBAL_SUMMARY_SCHEMA, _metric_rows(summary))
+    write_rows(global_summary, GLOBAL_SUMMARY_SCHEMA, _metric_rows(summary))
     overlap_summary = summaries_root / "by-overlap.parquet"
-    _write_rows(overlap_summary, OVERLAP_SUMMARY_SCHEMA, _overlap_rows(summary))
+    write_rows(overlap_summary, OVERLAP_SUMMARY_SCHEMA, _overlap_rows(summary))
     by_pbf_summary = summaries_root / "by-source-pbf.parquet"
-    _write_rows(by_pbf_summary, GROUP_SUMMARY_SCHEMA, _group_rows(connection, by_pbf, "source_pbf"))
-    by_region_summary = summaries_root / "by-region.parquet"
-    _write_rows(by_region_summary, GROUP_SUMMARY_SCHEMA, _group_rows(connection, compact, "region"))
-    failure_summary = summaries_root / "geometry-failures.parquet"
-    _write_failure_summary(
-        connection, occurrence_root.parent / "geometry-failures", failure_summary
+    write_rows(
+        by_pbf_summary,
+        GROUP_SUMMARY_SCHEMA,
+        _group_rows(connection, by_pbf, "source_pbf"),
     )
+    by_region_summary = summaries_root / "by-region.parquet"
+    write_rows(
+        by_region_summary,
+        GROUP_SUMMARY_SCHEMA,
+        _group_rows(connection, compact, "region"),
+    )
+    by_pbf_metrics = summaries_root / "by-source-pbf-metrics.parquet"
+    write_rows(
+        by_pbf_metrics,
+        GROUP_METRIC_SCHEMA,
+        _group_metric_rows(connection, by_pbf, "source_pbf", "source_pbf"),
+    )
+    by_region_metrics = summaries_root / "by-region-metrics.parquet"
+    write_rows(
+        by_region_metrics,
+        GROUP_METRIC_SCHEMA,
+        _group_metric_rows(connection, compact, "region", "region"),
+    )
+    failure_summary = summaries_root / "geometry-failures.parquet"
+    if replace_existing:
+        _write_failure_summary(
+            connection,
+            occurrence_root.parent / "geometry-failures",
+            failure_summary,
+            replace_existing=True,
+        )
+    else:
+        _write_failure_summary(
+            connection, occurrence_root.parent / "geometry-failures", failure_summary
+        )
     conflict_summary = summaries_root / "conflicts.parquet"
-    _write_conflicts(connection, occurrence_root, conflict_summary)
+    if replace_existing:
+        _write_conflicts(
+            connection,
+            occurrence_root,
+            conflict_summary,
+            replace_existing=True,
+        )
+    else:
+        _write_conflicts(connection, occurrence_root, conflict_summary)
     return (
         global_summary,
         by_pbf_summary,
         by_region_summary,
+        by_pbf_metrics,
+        by_region_metrics,
         overlap_summary,
         failure_summary,
         conflict_summary,
@@ -663,7 +1106,11 @@ def _write_summary_outputs(
 
 
 def _write_failure_summary(
-    connection: duckdb.DuckDBPyConnection, failure_root: Path, output: Path
+    connection: duckdb.DuckDBPyConnection,
+    failure_root: Path,
+    output: Path,
+    *,
+    replace_existing: bool = False,
 ) -> None:
     files = tuple(sorted(failure_root.glob("*.parquet"))) if failure_root.is_dir() else ()
     rows = []
@@ -681,11 +1128,18 @@ def _write_failure_summary(
             {"candidate_kind": str(candidate), "failure_kind": str(kind), "count": int(count)}
             for candidate, kind, count in result
         ]
-    _write_rows(output, FAILURE_SUMMARY_SCHEMA, rows)
+    if replace_existing:
+        _write_rows(output, FAILURE_SUMMARY_SCHEMA, rows, replace_existing=True)
+    else:
+        _write_rows(output, FAILURE_SUMMARY_SCHEMA, rows)
 
 
 def _write_conflicts(
-    connection: duckdb.DuckDBPyConnection, occurrence_root: Path, output: Path
+    connection: duckdb.DuckDBPyConnection,
+    occurrence_root: Path,
+    output: Path,
+    *,
+    replace_existing: bool = False,
 ) -> None:
     result = connection.execute(
         """
@@ -694,7 +1148,7 @@ def _write_conflicts(
             osm_id,
             COUNT(*) AS occurrence_count,
             COUNT(DISTINCT geometry_hash) AS distinct_geometry_count,
-            CAST(to_json(list(source_pbf ORDER BY source_pbf)) AS VARCHAR) AS source_pbfs
+            CAST(to_json(list(DISTINCT source_pbf ORDER BY source_pbf)) AS VARCHAR) AS source_pbfs
         FROM read_parquet(?)
         GROUP BY osm_type, osm_id
         HAVING COUNT(*) > 1
@@ -712,7 +1166,10 @@ def _write_conflicts(
         }
         for osm_type, osm_id, occurrence_count, distinct_geometry_count, source_pbfs in result
     ]
-    _write_rows(output, CONFLICT_SCHEMA, rows)
+    if replace_existing:
+        _write_rows(output, CONFLICT_SCHEMA, rows, replace_existing=True)
+    else:
+        _write_rows(output, CONFLICT_SCHEMA, rows)
 
 
 def summarize_rows(rows: Iterable[Mapping[str, object]]) -> dict[str, Any]:
@@ -745,11 +1202,18 @@ def _validate_aggregate_inputs(
     return _membership_paths(membership_root)
 
 
-def _validate_aggregate_target(target: Path) -> None:
-    existing_outputs = tuple(
-        target / name for name in ("coverage", "summaries", "scratch") if (target / name).exists()
-    )
-    if existing_outputs:
+def _existing_output_directories(target: Path) -> tuple[Path, ...]:
+    existing: list[Path] = []
+    for name in ("coverage", "summaries", "scratch"):
+        path = target / name
+        if path.exists():
+            existing.append(path)
+    return tuple(existing)
+
+
+def _validate_aggregate_target(target: Path, *, resume: bool = False) -> None:
+    existing_outputs = _existing_output_directories(target)
+    if existing_outputs and not resume:
         names = ", ".join(str(path) for path in existing_outputs)
         raise AggregationError(f"aggregate output directories already exist: {names}")
 
@@ -759,28 +1223,60 @@ def aggregate_run(
     occurrence_root: Path,
     membership_root: Path,
     output_root: Path | None = None,
+    resume: bool = False,
 ) -> AggregationResult:
     """Aggregate occurrence and membership shards into compact coverage outputs."""
 
     members = _validate_aggregate_inputs(occurrence_root, membership_root)
     target = _aggregate_target(occurrence_root, output_root)
-    _validate_aggregate_target(target)
+    _validate_aggregate_target(target, resume=resume)
     target.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect(database=":memory:")
     try:
-        global_paths, compact, row_count = _materialize_global(
-            connection, occurrence_root, members, target
-        )
-        by_pbf = _materialize_by_pbf(connection, occurrence_root, members, target)
+        _configure_connection(connection, target)
+        if resume:
+            global_paths, compact, row_count = _materialize_global(
+                connection,
+                occurrence_root,
+                members,
+                target,
+                replace_existing=True,
+            )
+            by_pbf = _materialize_by_pbf(
+                connection,
+                occurrence_root,
+                members,
+                target,
+                replace_existing=True,
+            )
+        else:
+            global_paths, compact, row_count = _materialize_global(
+                connection, occurrence_root, members, target
+            )
+            by_pbf = _materialize_by_pbf(connection, occurrence_root, members, target)
         summary = _fetch_summary(
             connection,
             compact,
             members,
             occurrence_root.parent / "geometry-failures",
         )
-        summary_paths = _write_summary_outputs(
-            connection, compact, by_pbf, target, summary, occurrence_root
-        )
+        if resume:
+            summary_paths = _write_summary_outputs(
+                connection,
+                compact,
+                by_pbf,
+                target,
+                summary,
+                occurrence_root,
+                replace_existing=True,
+            )
+        else:
+            summary_paths = _write_summary_outputs(
+                connection, compact, by_pbf, target, summary, occurrence_root
+            )
     finally:
-        connection.close()
+        try:
+            connection.close()
+        finally:
+            _cleanup_duckdb_spill(target)
     return AggregationResult(target, global_paths, by_pbf, summary_paths, row_count, summary)

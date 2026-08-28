@@ -161,6 +161,21 @@ def test_writer_creates_missing_nested_directories_and_defaults_are_shared(tmp_p
     failure.close()
 
 
+def test_empty_writers_emit_schema_shards_for_zero_result_sources(tmp_path: Path) -> None:
+    occurrence = OccurrenceShardWriter(tmp_path, source_stem="empty-occurrence")
+    failure = FailureShardWriter(tmp_path, source_stem="empty-failure")
+
+    occurrence.close()
+    failure.close()
+
+    occurrence_path = tmp_path / "empty-occurrence-00000.parquet"
+    failure_path = tmp_path / "empty-failure-00000.parquet"
+    assert pq.read_table(occurrence_path).num_rows == 0
+    assert pq.read_schema(occurrence_path) == OCCURRENCE_SCHEMA
+    assert pq.read_table(failure_path).num_rows == 0
+    assert pq.read_schema(failure_path) == FAILURE_SCHEMA
+
+
 def test_writer_serializes_datetime_and_nullable_failure_identity(tmp_path: Path) -> None:
     writer = OccurrenceShardWriter(tmp_path, source_stem="datetime", batch_rows=1)
     value = replace(_occurrence(1), osm_timestamp=datetime(2026, 1, 1, tzinfo=UTC))
