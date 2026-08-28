@@ -14,6 +14,8 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
     for token in ("uv sync --frozen", "ruff", "ty", "pytest", "mkdocs build --strict"):
         assert token in ci
     assert "mkdocs build --strict" in docs
+    assert "mutmut results --all true" in ci
+    assert "survived" in ci
 
 
 def test_ci_does_not_reference_seagate_inputs() -> None:

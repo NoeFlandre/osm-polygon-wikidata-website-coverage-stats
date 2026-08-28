@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,16 @@ def _write_report(path: Path, text: str, *, resume: bool) -> Path:
     if resume:
         return _write_text(path, text, replace_existing=True)
     return _write_text(path, text)
+
+
+def _save_png(figure: Any, path: Path) -> None:
+    temporary = path.with_name(f".{path.stem}.tmp{path.suffix}")
+    temporary.unlink(missing_ok=True)
+    try:
+        figure.savefig(temporary, dpi=120, metadata={"Software": "osm polygon coverage"})
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def render_markdown(summary: Mapping[str, Any], output_path: Path, *, resume: bool = False) -> Path:
@@ -116,7 +127,7 @@ def _render_coverage_chart(summary: Mapping[str, Any], path: Path) -> None:
     axis.set_title("Successful text coverage overlap")
     axis.tick_params(axis="x", labelrotation=35)
     figure.tight_layout()
-    figure.savefig(path, dpi=120, metadata={"Software": "osm polygon coverage"})
+    _save_png(figure, path)
     plt.close(figure)
 
 
@@ -131,7 +142,7 @@ def _render_area_chart(summary: Mapping[str, Any], path: Path) -> None:
     axis.set_title("Polygon area statistics")
     axis.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
     figure.tight_layout()
-    figure.savefig(path, dpi=120, metadata={"Software": "osm polygon coverage"})
+    _save_png(figure, path)
     plt.close(figure)
 
 

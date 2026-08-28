@@ -14,6 +14,9 @@ uv run coverage preflight
 uv run coverage run --run-id 20260828-coverage-v5 --workers 8
 ```
 
+The worker option is bounded to a maximum of eight independent PBF workers;
+the default is four.
+
 The `run` command extracts all sorted regular raw PBFs, joins successful source
 memberships, aggregates global/per-PBF/per-region coverage, renders reports,
 and writes a manifest only after required generated Parquets, schemas, and
@@ -32,7 +35,8 @@ any stale spill directory left by an abrupt process termination.
 Extraction is resumable at PBF boundaries. The default `--resume` mode stores
 one atomic JSON checkpoint per completed PBF under `checkpoints/`; a checkpoint
 is accepted only when the source filename, size, mtime, occurrence/failure
-counts, and both source shard families still agree. Missing or incomplete
+counts, extraction mode, hashes, row counts, schemas, and both source shard
+families still agree. Missing or incomplete
 outputs are cleaned for that PBF and rescanned. Membership, aggregation,
 reports, and the completion manifest are also rebuilt atomically on resume, so
 an interruption in any later stage can reuse the completed extraction. Use

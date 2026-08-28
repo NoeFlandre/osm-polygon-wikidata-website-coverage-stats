@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import cast
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -13,16 +14,29 @@ from osm_polygon_wikidata_website_coverage.domain.identity import (
     Occurrence,
     OsmIdentity,
 )
+from osm_polygon_wikidata_website_coverage.io.parquet import FAILURE_SCHEMA, OCCURRENCE_SCHEMA
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.extract import (
+    MAX_WORKERS,
     ExtractionError,
     InputChangedError,
     SourceInventory,
     SourceSnapshot,
     _assert_unchanged,
     _checkpoint_counts,
+    _checkpoint_family_matches,
+    _checkpoint_family_ready,
+    _checkpoint_file_matches,
+    _checkpoint_file_metadata_matches,
+    _checkpoint_files_match,
+    _checkpoint_identity_matches,
+    _checkpoint_inventory,
     _checkpoint_matches,
+    _checkpoint_outputs_match,
+    _checkpoint_parquet_matches,
     _checkpoint_path,
+    _checkpoint_paths_match,
+    _checkpoint_shard_inventory,
     _emit_to_writers,
     _extract_in_parallel,
     _extract_sources,
@@ -33,11 +47,19 @@ from osm_polygon_wikidata_website_coverage.pipeline.extract import (
     _read_checkpoint,
     _read_checkpoint_fields,
     _remove_incomplete_outputs,
+    _schema_matches,
     _source_output_paths,
     _source_path_matches,
     _source_temporary_paths,
+    _valid_sha256,
+    _validate_worker_configuration,
     _write_checkpoint,
     extract_all,
+    regular_pbf_files,
+    scanner_mode,
+)
+from osm_polygon_wikidata_website_coverage.pipeline.extract import (
+    _sha256 as extract_sha256,
 )
 
 
@@ -198,6 +220,163 @@ def test_extract_all_rejects_nonpositive_workers(tmp_path: Path) -> None:
         extract_all(_paths(tmp_path, raw), "invalid-workers", workers=0)
 
 
+def test_extract_all_rejects_workers_above_the_bounded_limit(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+
+    with pytest.raises(ValueError, match=rf"^workers must be <= {MAX_WORKERS}$"):
+        extract_all(_paths(tmp_path, raw), "too-many-workers", workers=MAX_WORKERS + 1)
+
+
+def test_extract_worker_limit_is_inclusive() -> None:
+    _validate_worker_configuration(MAX_WORKERS, extract_module.scan_pbf)
+
+
+def test_regular_pbf_files_excludes_directories_from_the_preflight_inventory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "fixture-latest.osm.pbf").write_bytes(b"fixture")
+    (tmp_path / "nested-latest.osm.pbf").mkdir()
+
+    assert regular_pbf_files(tmp_path) == (tmp_path / "fixture-latest.osm.pbf",)
+
+
+def test_scanner_mode_distinguishes_geometry_and_coverage_only() -> None:
+    assert scanner_mode(None) == "geometry"
+    assert scanner_mode(scan_pbf_keys) == "coverage-only"
+
+
+def test_checkpoint_inventory_rejects_malformed_entries() -> None:
+    assert _checkpoint_inventory({}, "occurrence_shards") is None
+    assert _checkpoint_inventory({"occurrence_shards": [None]}, "occurrence_shards") is None
+    assert (
+        _checkpoint_inventory({"occurrence_shards": [{"path": "wrong"}]}, "occurrence_shards")
+        is None
+    )
+    valid_entry = {
+        "path": "occurrences/fixture-00000.parquet",
+        "size_bytes": 1,
+        "mtime_ns": 1,
+        "row_count": 1,
+        "sha256": "0" * 64,
+    }
+    assert (
+        _checkpoint_inventory(
+            {"occurrence_shards": [{**valid_entry, "path": None}]},
+            "occurrence_shards",
+        )
+        is None
+    )
+    assert (
+        _checkpoint_inventory(
+            {"occurrence_shards": [{**valid_entry, "sha256": "z" * 64}]},
+            "occurrence_shards",
+        )
+        is None
+    )
+    assert _checkpoint_inventory({"occurrence_shards": [valid_entry]}, "occurrence_shards") == [
+        valid_entry
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0" * 64, True),
+        ("f" * 64, True),
+        (None, False),
+        ("0" * 63, False),
+        ("0" * 65, False),
+        ("G" * 64, False),
+        ("X" * 64, False),
+        ("A" * 64, False),
+    ],
+)
+def test_extract_sha256_validation_is_lowercase_hex_with_exact_length(
+    value: object, expected: bool
+) -> None:
+    assert _valid_sha256(value) is expected
+
+
+def test_extract_sha256_reads_bounded_chunks_and_returns_the_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Stream:
+        def __init__(self) -> None:
+            self.sizes: list[int | None] = []
+            self.chunks = iter((b"first", b"second", b""))
+
+        def __enter__(self) -> "Stream":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self, size: int | None = None) -> bytes:
+            self.sizes.append(size)
+            return next(self.chunks)
+
+    class Hash:
+        def __init__(self) -> None:
+            self.updates: list[bytes] = []
+
+        def update(self, chunk: bytes) -> None:
+            self.updates.append(chunk)
+
+        def hexdigest(self) -> str:
+            return "digest"
+
+    stream = Stream()
+    digest = Hash()
+
+    class File:
+        def open(self, mode: str) -> Stream:
+            assert mode == "rb"
+            return stream
+
+    monkeypatch.setattr(extract_module.hashlib, "sha256", lambda: digest)
+
+    assert extract_sha256(cast(Path, File())) == "digest"
+    assert stream.sizes == [8 * 1024 * 1024, 8 * 1024 * 1024, 8 * 1024 * 1024]
+    assert digest.updates == [b"first", b"second"]
+
+
+def test_checkpoint_shard_inventory_rejects_missing_parquet_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "fixture-latest.osm.pbf"
+    source.write_bytes(b"fixture")
+    run_root = tmp_path / "run"
+    shard = run_root / "occurrences" / "fixture-latest-00000.parquet"
+    shard.parent.mkdir(parents=True)
+    shard.write_bytes(b"placeholder")
+
+    monkeypatch.setattr(
+        extract_module.pq,
+        "ParquetFile",
+        lambda path: type("MetadataHolder", (), {"metadata": None})(),
+    )
+    with pytest.raises(ExtractionError, match="invalid extracted Parquet metadata"):
+        _checkpoint_shard_inventory(run_root, source, "occurrences")
+    assert (
+        _checkpoint_inventory(
+            {
+                "occurrence_shards": [
+                    {
+                        "path": "occurrences/fixture-00000.parquet",
+                        "size_bytes": -1,
+                        "mtime_ns": 1,
+                        "row_count": 1,
+                        "sha256": "0" * 64,
+                    }
+                ]
+            },
+            "occurrence_shards",
+        )
+        is None
+    )
+
+
 def test_extract_all_rejects_parallel_custom_scanners(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()
@@ -300,6 +479,39 @@ def test_extract_all_resumes_completed_sources_without_rescanning(tmp_path: Path
     assert calls == [pbf.name]
 
 
+def test_extract_all_rescans_when_a_checkpoint_shard_changes(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    pbf = raw / "fixture-latest.osm.pbf"
+    pbf.write_bytes(b"fixture")
+    calls: list[str] = []
+
+    def scanner(path: Path, callback) -> None:
+        calls.append(path.name)
+        callback(_occurrence(path.name, 1))
+
+    first = extract_all(
+        _paths(tmp_path, raw),
+        "changed-shard",
+        scanner=scanner,
+        batch_rows=1,
+        resume=True,
+    )
+    shard = first.run_root / "occurrences" / "fixture-latest-00000.parquet"
+    shard.write_bytes(shard.read_bytes() + b"tampered")
+
+    second = extract_all(
+        _paths(tmp_path, raw),
+        "changed-shard",
+        scanner=scanner,
+        batch_rows=1,
+        resume=True,
+    )
+
+    assert second.occurrence_count == 1
+    assert calls == [pbf.name, pbf.name]
+
+
 def test_extract_all_rescans_incomplete_sources_after_cleaning_derived_shards(
     tmp_path: Path,
 ) -> None:
@@ -374,11 +586,18 @@ def test_extract_resume_helpers_use_exact_source_and_checkpoint_paths(
     extraction = extract_module._SourceExtraction(0, 0, SourceInventory(snapshot, snapshot))
     _write_checkpoint(checkpoint_root, source, extraction)
     checkpoint = checkpoint_root / "fixture-latest.json"
-    assert checkpoint.read_text(encoding="utf-8") == (
-        '{\n  "failure_count": 0,\n  "mtime_ns": '
-        f'{snapshot.mtime_ns},\n  "occurrence_count": 0,\n  "size_bytes": {snapshot.size_bytes},\n'
-        '  "source_pbf": "fixture-latest.osm.pbf"\n}'
-    )
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert payload == {
+        "failure_count": 0,
+        "failure_shards": [],
+        "mtime_ns": snapshot.mtime_ns,
+        "occurrence_count": 0,
+        "occurrence_shards": [],
+        "scanner_mode": "geometry",
+        "size_bytes": snapshot.size_bytes,
+        "source_pbf": "fixture-latest.osm.pbf",
+    }
+    assert checkpoint.read_text(encoding="utf-8") == json.dumps(payload, sort_keys=True, indent=2)
 
     captured_encodings: list[str | None] = []
     original_write_text = Path.write_text
@@ -417,11 +636,17 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
     checkpoint_root = run_root / "checkpoints"
     snapshot = SourceSnapshot.read(source)
     extraction = extract_module._SourceExtraction(0, 0, SourceInventory(snapshot, snapshot))
-    _write_checkpoint(checkpoint_root, source, extraction)
     (run_root / "occurrences").mkdir(parents=True)
     (run_root / "geometry-failures").mkdir(parents=True)
-    (run_root / "occurrences" / "fixture-latest-00000.parquet").write_bytes(b"occurrences")
-    (run_root / "geometry-failures" / "fixture-latest-00000.parquet").write_bytes(b"failures")
+    pq.write_table(
+        pa.Table.from_pylist([], schema=OCCURRENCE_SCHEMA),
+        run_root / "occurrences" / "fixture-latest-00000.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist([], schema=FAILURE_SCHEMA),
+        run_root / "geometry-failures" / "fixture-latest-00000.parquet",
+    )
+    _write_checkpoint(checkpoint_root, source, extraction)
 
     captured_encodings: list[str | None] = []
     original_read_text = Path.read_text
@@ -456,11 +681,13 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
                 "source_pbf": source.name,
                 "size_bytes": snapshot.size_bytes,
                 "mtime_ns": snapshot.mtime_ns,
+                "scanner_mode": "geometry",
             },
             source,
             snapshot,
             0,
             0,
+            scanner_mode="geometry",
         )
         is True
     )
@@ -470,13 +697,48 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
                 "source_pbf": source.name,
                 "size_bytes": snapshot.size_bytes,
                 "mtime_ns": snapshot.mtime_ns,
+                "scanner_mode": "geometry",
             },
             source,
             snapshot,
             0,
             -1,
+            scanner_mode="geometry",
         )
         is False
+    )
+
+    assert (
+        _checkpoint_matches(
+            {
+                "source_pbf": source.name,
+                "size_bytes": snapshot.size_bytes,
+                "mtime_ns": snapshot.mtime_ns,
+                "scanner_mode": "coverage-only",
+            },
+            source,
+            snapshot,
+            0,
+            0,
+            scanner_mode="geometry",
+        )
+        is False
+    )
+
+    valid_identity = {
+        "source_pbf": source.name,
+        "size_bytes": snapshot.size_bytes,
+        "mtime_ns": snapshot.mtime_ns,
+        "scanner_mode": "geometry",
+    }
+    assert not _checkpoint_matches(
+        {**valid_identity, "source_pbf": "other.osm.pbf"}, source, snapshot, 0, 0
+    )
+    assert not _checkpoint_matches(
+        {**valid_identity, "size_bytes": snapshot.size_bytes + 1}, source, snapshot, 0, 0
+    )
+    assert not _checkpoint_matches(
+        {**valid_identity, "mtime_ns": snapshot.mtime_ns + 1}, source, snapshot, 0, 0
     )
 
     checkpoint = checkpoint_root / "fixture-latest.json"
@@ -515,6 +777,60 @@ def test_extract_checkpoint_validation_helpers_cover_valid_and_invalid_values(
     assert _read_checkpoint_fields(malformed, source) is None
 
 
+def test_checkpoint_identity_requires_every_source_and_mode_field(tmp_path: Path) -> None:
+    source = tmp_path / "fixture-latest.osm.pbf"
+    source.write_bytes(b"fixture")
+    snapshot = SourceSnapshot.read(source)
+    identity: dict[object, object] = {
+        "source_pbf": source.name,
+        "size_bytes": snapshot.size_bytes,
+        "mtime_ns": snapshot.mtime_ns,
+        "scanner_mode": "geometry",
+    }
+
+    assert _checkpoint_identity_matches(identity, source, snapshot, "geometry") is True
+    assert (
+        _checkpoint_identity_matches(
+            {**identity, "source_pbf": "other.osm.pbf"}, source, snapshot, "geometry"
+        )
+        is False
+    )
+    assert (
+        _checkpoint_identity_matches({**identity, "size_bytes": 0}, source, snapshot, "geometry")
+        is False
+    )
+    assert (
+        _checkpoint_identity_matches({**identity, "mtime_ns": 0}, source, snapshot, "geometry")
+        is False
+    )
+    assert _checkpoint_identity_matches(identity, source, snapshot, "coverage-only") is False
+
+
+def test_extract_all_resumes_coverage_only_scanner_with_matching_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    pbf = raw / "fixture-latest.osm.pbf"
+    pbf.write_bytes(b"fixture")
+    calls: list[str] = []
+
+    def key_scanner(path: Path, callback) -> None:
+        calls.append(path.name)
+        callback(_occurrence(path.name, 1))
+
+    monkeypatch.setattr(extract_module, "scan_pbf_keys", key_scanner)
+    scanner = extract_module.scan_pbf_keys
+    first = extract_all(_paths(tmp_path, raw), "coverage-only", scanner=scanner, resume=True)
+    checkpoint = first.run_root / "checkpoints/fixture-latest.json"
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["scanner_mode"] == "coverage-only"
+
+    second = extract_all(_paths(tmp_path, raw), "coverage-only", scanner=scanner, resume=True)
+
+    assert second.occurrence_count == 1
+    assert calls == [pbf.name]
+
+
 def test_extract_read_checkpoint_uses_exact_source_output_directory_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,21 +840,39 @@ def test_extract_read_checkpoint_uses_exact_source_output_directory_names(
     checkpoint_root = run_root / "checkpoints"
     snapshot = SourceSnapshot.read(source)
     extraction = extract_module._SourceExtraction(1, 2, SourceInventory(snapshot, snapshot))
+    (run_root / "occurrences").mkdir(parents=True)
+    (run_root / "geometry-failures").mkdir(parents=True)
+    with (
+        extract_module.OccurrenceShardWriter(
+            run_root / "occurrences", source_stem="fixture-latest", batch_rows=1
+        ) as occurrence_writer,
+        extract_module.FailureShardWriter(
+            run_root / "geometry-failures", source_stem="fixture-latest", batch_rows=1
+        ) as failure_writer,
+    ):
+        occurrence_writer.write(_occurrence(source.name, 1))
+        failure_writer.write(
+            GeometryFailure(
+                identity=OsmIdentity("way", 2),
+                source_pbf=source.name,
+                candidate_kind="closed_way",
+                failure_kind="invalid_geometry",
+                message="first",
+            )
+        )
+        failure_writer.write(
+            GeometryFailure(
+                identity=OsmIdentity("relation", 3),
+                source_pbf=source.name,
+                candidate_kind="boundary_relation",
+                failure_kind="invalid_geometry",
+                message="second",
+            )
+        )
     _write_checkpoint(checkpoint_root, source, extraction)
-    calls: list[tuple[Path, str, str]] = []
-
-    def source_output_paths(root: Path, directory: str, source_stem: str) -> tuple[Path, ...]:
-        calls.append((root, directory, source_stem))
-        return (root / directory / f"{source_stem}-00000.parquet",)
-
-    monkeypatch.setattr(extract_module, "_source_output_paths", source_output_paths)
     loaded = _read_checkpoint(checkpoint_root, run_root, source)
 
     assert loaded == extraction
-    assert calls == [
-        (run_root, "occurrences", "fixture-latest"),
-        (run_root, "geometry-failures", "fixture-latest"),
-    ]
 
 
 def test_extract_cleanup_removes_all_source_outputs_and_checkpoint_temps(tmp_path: Path) -> None:
@@ -731,7 +1065,7 @@ def test_extract_checkpoint_validation_is_fail_closed(tmp_path: Path) -> None:
     occurrences.write_bytes(b"occurrences")
     assert _read_checkpoint(checkpoint_root, run_root, pbf) is None
     failures.write_bytes(b"failures")
-    assert _read_checkpoint(checkpoint_root, run_root, pbf) is not None
+    assert _read_checkpoint(checkpoint_root, run_root, pbf) is None
 
     checkpoint.write_text("{", encoding="utf-8")
     assert _read_checkpoint(checkpoint_root, run_root, pbf) is None
@@ -770,6 +1104,228 @@ def test_extract_checkpoint_validation_is_fail_closed(tmp_path: Path) -> None:
         snapshot,
         -1,
         0,
+    )
+
+
+def test_checkpoint_output_validation_rejects_temporary_wrong_path_and_schema(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "fixture-latest.osm.pbf"
+    source.write_bytes(b"fixture")
+    run_root = tmp_path / "run"
+    (run_root / "occurrences").mkdir(parents=True)
+    (run_root / "geometry-failures").mkdir()
+    occurrence = run_root / "occurrences" / "fixture-latest-00000.parquet"
+    failure = run_root / "geometry-failures" / "fixture-latest-00000.parquet"
+    pq.write_table(pa.Table.from_pylist([], schema=OCCURRENCE_SCHEMA), occurrence)
+    pq.write_table(pa.Table.from_pylist([], schema=FAILURE_SCHEMA), failure)
+    assert _checkpoint_shard_inventory(run_root, source, "occurrences")[0]["path"] == (
+        "occurrences/fixture-latest-00000.parquet"
+    )
+    snapshot = SourceSnapshot.read(source)
+    extraction = extract_module._SourceExtraction(0, 0, SourceInventory(snapshot, snapshot))
+    checkpoint_root = run_root / "checkpoints"
+    _write_checkpoint(checkpoint_root, source, extraction)
+    payload = json.loads((checkpoint_root / "fixture-latest.json").read_text(encoding="utf-8"))
+
+    assert _checkpoint_outputs_match(payload, run_root, source, 0, 0) is True
+    assert (
+        _checkpoint_family_ready(
+            payload, run_root, "fixture-latest", "occurrence_shards", "occurrences"
+        )
+        is True
+    )
+    assert (
+        _checkpoint_family_matches(
+            payload,
+            run_root,
+            "fixture-latest",
+            "occurrence_shards",
+            "occurrences",
+            OCCURRENCE_SCHEMA,
+            0,
+        )
+        is True
+    )
+    assert (
+        _checkpoint_paths_match(
+            (occurrence,),
+            cast(list[dict[str, object]], payload["occurrence_shards"]),
+            run_root,
+        )
+        is True
+    )
+    assert _checkpoint_paths_match((), [], run_root) is True
+    assert (
+        _checkpoint_family_ready({}, run_root, "fixture-latest", "occurrence_shards", "occurrences")
+        is False
+    )
+
+    entry = cast(dict[str, object], payload["occurrence_shards"][0])
+    assert _checkpoint_file_metadata_matches(occurrence, entry) is True
+    assert _checkpoint_file_metadata_matches(occurrence, {**entry, "size_bytes": 0}) is False
+    assert _checkpoint_file_metadata_matches(occurrence, {**entry, "mtime_ns": 0}) is False
+    assert _checkpoint_file_metadata_matches(occurrence, {**entry, "sha256": "0" * 64}) is False
+    assert _checkpoint_parquet_matches(occurrence, entry, OCCURRENCE_SCHEMA) is True
+    assert _checkpoint_file_matches(entry, run_root, "occurrences", OCCURRENCE_SCHEMA) is True
+    assert (
+        _checkpoint_file_matches(
+            {**entry, "path": None}, run_root, "occurrences", OCCURRENCE_SCHEMA
+        )
+        is False
+    )
+
+    temporary = run_root / "occurrences" / ".fixture-latest-00001.tmp"
+    temporary.write_bytes(b"in progress")
+    assert (
+        _checkpoint_family_ready(
+            payload, run_root, "fixture-latest", "occurrence_shards", "occurrences"
+        )
+        is False
+    )
+    assert _checkpoint_outputs_match(payload, run_root, source, 0, 0) is False
+    temporary.unlink()
+
+    entry = cast(dict[str, object], payload["occurrence_shards"][0])
+    wrong_payload = {
+        **payload,
+        "occurrence_shards": [{**entry, "path": "occurrences/other.parquet"}],
+    }
+    assert (
+        _checkpoint_family_ready(
+            wrong_payload, run_root, "fixture-latest", "occurrence_shards", "occurrences"
+        )
+        is False
+    )
+    assert (
+        _checkpoint_family_matches(
+            wrong_payload,
+            run_root,
+            "fixture-latest",
+            "occurrence_shards",
+            "occurrences",
+            OCCURRENCE_SCHEMA,
+            0,
+        )
+        is False
+    )
+    assert _checkpoint_outputs_match(wrong_payload, run_root, source, 0, 0) is False
+    assert _checkpoint_file_matches(entry, run_root, "occurrences", FAILURE_SCHEMA) is False
+    assert (
+        _checkpoint_file_matches(
+            {**entry, "row_count": cast(int, entry["row_count"]) + 1},
+            run_root,
+            "occurrences",
+            OCCURRENCE_SCHEMA,
+        )
+        is False
+    )
+    wrong_path = {**entry, "path": "geometry-failures/fixture-latest-00000.parquet"}
+    assert _checkpoint_file_matches(wrong_path, run_root, "occurrences", OCCURRENCE_SCHEMA) is False
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        extract_module.pq,
+        "ParquetFile",
+        lambda path: type("MetadataHolder", (), {"metadata": None})(),
+    )
+    try:
+        assert _checkpoint_file_matches(entry, run_root, "occurrences", OCCURRENCE_SCHEMA) is False
+    finally:
+        monkeypatch.undo()
+
+
+def test_checkpoint_file_collection_fails_closed_on_reader_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry: dict[str, object] = {
+        "path": "occurrences/fixture-latest-00000.parquet",
+        "size_bytes": 1,
+        "mtime_ns": 1,
+        "row_count": 0,
+        "sha256": "0" * 64,
+    }
+
+    def fail_reader(*args: object) -> bool:
+        del args
+        raise OSError("reader failed")
+
+    monkeypatch.setattr(extract_module, "_checkpoint_file_matches", fail_reader)
+    assert (
+        _checkpoint_files_match(
+            [entry], tmp_path, "occurrences", OCCURRENCE_SCHEMA, expected_count=0
+        )
+        is False
+    )
+
+
+def test_checkpoint_file_collection_sums_all_valid_row_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entries: list[dict[str, object]] = [
+        {"path": "one.parquet", "row_count": 1},
+        {"path": "two.parquet", "row_count": 2},
+    ]
+
+    monkeypatch.setattr(extract_module, "_checkpoint_file_matches", lambda *args: True)
+
+    assert _checkpoint_files_match(entries, tmp_path, "occurrences", OCCURRENCE_SCHEMA, 3)
+    assert not _checkpoint_files_match(entries, tmp_path, "occurrences", OCCURRENCE_SCHEMA, 1)
+    assert not _checkpoint_files_match(
+        [{"path": "one.parquet", "row_count": None}],
+        tmp_path,
+        "occurrences",
+        OCCURRENCE_SCHEMA,
+        0,
+    )
+
+
+def test_checkpoint_file_match_rejects_an_existing_file_in_another_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "other" / "fixture.parquet"
+    other.parent.mkdir()
+    other.write_bytes(b"fixture")
+    entry: dict[str, object] = {"path": "other/fixture.parquet"}
+    monkeypatch.setattr(extract_module, "_checkpoint_file_metadata_matches", lambda *args: True)
+    monkeypatch.setattr(extract_module, "_checkpoint_parquet_matches", lambda *args: True)
+
+    assert _checkpoint_file_matches(entry, tmp_path, "occurrences", OCCURRENCE_SCHEMA) is False
+
+
+def test_extract_schema_matching_requires_names_and_types() -> None:
+    same_names_wrong_types = pa.schema(
+        [
+            pa.field(field.name, pa.string() if field.name == "osm_id" else field.type)
+            for field in OCCURRENCE_SCHEMA
+        ]
+    )
+    different_names_same_types = pa.schema(
+        [pa.field(f"renamed_{field.name}", field.type) for field in OCCURRENCE_SCHEMA]
+    )
+
+    assert _schema_matches(OCCURRENCE_SCHEMA, OCCURRENCE_SCHEMA) is True
+    assert _schema_matches(OCCURRENCE_SCHEMA, same_names_wrong_types) is False
+    assert _schema_matches(OCCURRENCE_SCHEMA, different_names_same_types) is False
+
+
+def test_checkpoint_family_match_fails_if_its_second_inventory_read_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract_module, "_checkpoint_family_ready", lambda *args: True)
+    monkeypatch.setattr(extract_module, "_checkpoint_inventory", lambda *args: None)
+
+    assert (
+        _checkpoint_family_matches(
+            {},
+            tmp_path,
+            "fixture-latest",
+            "occurrence_shards",
+            "occurrences",
+            OCCURRENCE_SCHEMA,
+            0,
+        )
+        is False
     )
 
 

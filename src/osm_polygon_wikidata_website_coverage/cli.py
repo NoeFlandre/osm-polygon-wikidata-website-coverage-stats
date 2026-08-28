@@ -17,6 +17,7 @@ from osm_polygon_wikidata_website_coverage.config.paths import (
     DataPaths,
 )
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
+from osm_polygon_wikidata_website_coverage.pipeline.extract import MAX_WORKERS, regular_pbf_files
 from osm_polygon_wikidata_website_coverage.pipeline.run import run_analysis
 
 app = typer.Typer(
@@ -50,7 +51,7 @@ def preflight(
     """Validate roots and list the sorted raw PBF inventory."""
 
     paths = _paths(data_root, raw_pbf_root, wikidata_root, website_root)
-    files = tuple(sorted(paths.raw_pbf_root.glob("*.osm.pbf"), key=lambda path: path.name))
+    files = regular_pbf_files(paths.raw_pbf_root)
     if not files:
         raise typer.BadParameter(f"no regular *.osm.pbf files found under {paths.raw_pbf_root}")
     typer.echo(f"data root: {paths.data_root}")
@@ -62,7 +63,12 @@ def preflight(
 @app.command("run")
 def run_command(
     run_id: str = typer.Option("20260828-coverage-v5", help="Unique run identifier."),
-    workers: int = typer.Option(4, min=1, help="Independent PBF extraction workers."),
+    workers: int = typer.Option(
+        4,
+        min=1,
+        max=MAX_WORKERS,
+        help=f"Independent PBF extraction workers (maximum {MAX_WORKERS}).",
+    ),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="Seagate output root."),
     raw_pbf_root: Path = typer.Option(DEFAULT_RAW_PBF_ROOT, help="Read-only raw PBF root."),
     wikidata_root: Path = typer.Option(DEFAULT_WIKIDATA_ROOT, help="Read-only Wikidata root."),

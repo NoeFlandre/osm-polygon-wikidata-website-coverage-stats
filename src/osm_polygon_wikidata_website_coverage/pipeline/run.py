@@ -30,6 +30,7 @@ from osm_polygon_wikidata_website_coverage.pipeline.aggregate import (
 from osm_polygon_wikidata_website_coverage.pipeline.extract import (
     ExtractionResult,
     extract_all,
+    scanner_mode,
 )
 from osm_polygon_wikidata_website_coverage.pipeline.join import (
     MEMBERSHIP_SCHEMA,
@@ -86,10 +87,15 @@ def _source_parquet_inventory(paths: DataPaths) -> list[dict[str, Any]]:
 
 
 def _generated_parquet_inventory(run_root: Path) -> list[dict[str, Any]]:
-    return [
-        _file_metadata(path, relative_to=run_root, include_hash=True)
-        for path in sorted(run_root.rglob("*.parquet"))
-    ]
+    inventory: list[dict[str, Any]] = []
+    for path in sorted(run_root.rglob("*.parquet")):
+        metadata = pq.ParquetFile(path).metadata
+        if metadata is None or metadata.num_rows < 0:
+            raise RuntimeError(f"invalid generated Parquet metadata: {path}")
+        item = _file_metadata(path, relative_to=run_root, include_hash=True)
+        item["row_count"] = metadata.num_rows
+        inventory.append(item)
+    return inventory
 
 
 def _generated_artifact_inventory(run_root: Path) -> list[dict[str, Any]]:
@@ -262,6 +268,7 @@ def _manifest_payload(
     aggregation: AggregationResult,
     generated: list[dict[str, Any]],
     artifacts: list[dict[str, Any]],
+    extraction_mode: str,
 ) -> dict[str, Any]:
     input_inventory = [
         {
@@ -276,6 +283,7 @@ def _manifest_payload(
         "schema_version": "1.0",
         "status": "complete",
         "run_id": run_id,
+        "extraction_mode": extraction_mode,
         "input_roots": {
             "raw_pbf_root": str(paths.raw_pbf_root),
             "wikidata_root": str(paths.wikidata_root),
@@ -361,6 +369,7 @@ def run_analysis(
         aggregation=aggregation,
         generated=generated,
         artifacts=artifacts,
+        extraction_mode=scanner_mode(scanner),
     )
     if resume:
         manifest_path = _write_manifest(extraction.run_root, payload, replace_existing=True)

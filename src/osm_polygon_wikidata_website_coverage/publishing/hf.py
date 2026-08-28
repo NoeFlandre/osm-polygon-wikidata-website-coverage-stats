@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import shutil
@@ -66,7 +67,7 @@ class PublicationBoundaryError(ValueError):
     """Raised when staging would publish data outside the approved boundary."""
 
 
-def _check_completed_run(run_root: Path) -> None:
+def _check_completed_run(run_root: Path) -> dict[str, object]:
     manifest = run_root / "manifests" / "manifest.json"
     if not manifest.is_file():
         raise PublicationBoundaryError(f"completed manifest is missing: {manifest}")
@@ -74,8 +75,11 @@ def _check_completed_run(run_root: Path) -> None:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PublicationBoundaryError(f"completed manifest is not valid JSON: {manifest}") from exc
+    if not isinstance(payload, dict):
+        raise PublicationBoundaryError("completed manifest is not a JSON object")
     if payload.get("status") != "complete":
         raise PublicationBoundaryError("run manifest is not complete")
+    return payload
 
 
 def _parquet_files(directory: Path, description: str) -> tuple[Path, ...]:
@@ -114,12 +118,21 @@ def _validate_exact_schema(path: Path, expected: pa.Schema) -> None:
 
 
 def _repository_file(name: str) -> Path:
+    package_file = Path(__file__).resolve().parents[1] / name
     repository_file = Path(__file__).parents[3] / name
-    candidates = (Path(__file__).parent / name, repository_file)
+    candidates = (package_file, repository_file)
     path = next((candidate for candidate in candidates if candidate.is_file()), None)
     if path is None:
         raise PublicationBoundaryError(f"repository publication file is missing: {repository_file}")
     return path
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _dataset_card(run_id: str) -> str:
@@ -217,6 +230,161 @@ def _validate_summary_staging_files(summary_files: tuple[Path, ...]) -> None:
         _validate_exact_schema(path, expected)
     if {path.name for path in summary_files} != set(_EXPECTED_SUMMARY_SCHEMAS):
         raise PublicationBoundaryError("summary files do not match the approved summary set")
+
+
+def _manifest_inventory(
+    payload: dict[str, object], *, field: str, count_field: str, include_row_count: bool
+) -> dict[str, dict[str, object]]:
+    value = _manifest_list(payload, field, count_field)
+    if value is None:
+        raise PublicationBoundaryError(f"completed manifest has invalid {field}")
+    expected_fields = {"path", "size_bytes", "mtime_ns", "sha256"}
+    if include_row_count:
+        expected_fields.add("row_count")
+    indexed: dict[str, dict[str, object]] = {}
+    for item in value:
+        entry = _manifest_entry(item, expected_fields, include_row_count)
+        if entry is None:
+            raise PublicationBoundaryError(f"completed manifest has invalid {field}")
+        _add_manifest_entry(indexed, entry, field)
+    return indexed
+
+
+def _manifest_list(payload: dict[str, object], field: str, count_field: str) -> list[object] | None:
+    value = payload.get(field)
+    if not isinstance(value, list):
+        return None
+    count = payload.get(count_field)
+    if not _validate_nonnegative_int(count):
+        return None
+    if count != len(value):
+        return None
+    return value
+
+
+def _manifest_entry(
+    item: object, expected_fields: set[str], include_row_count: bool
+) -> dict[str, object] | None:
+    if not isinstance(item, dict) or not isinstance(include_row_count, bool):
+        return None
+    entry = item
+    if set(entry) != expected_fields:
+        return None
+    if not _manifest_entry_values_valid(entry, include_row_count):
+        return None
+    return entry
+
+
+def _manifest_entry_values_valid(entry: dict[str, object], include_row_count: bool) -> bool:
+    if not isinstance(include_row_count, bool):
+        return False
+    numeric_fields = frozenset(("size_bytes", "mtime_ns"))
+    if include_row_count:
+        numeric_fields |= {"row_count"}
+    return all(
+        (
+            isinstance(entry.get("path"), str),
+            _validate_count_fields(entry, numeric_fields),
+            _valid_sha256(entry.get("sha256")),
+        )
+    )
+
+
+def _add_manifest_entry(
+    indexed: dict[str, dict[str, object]], entry: dict[str, object], field: str
+) -> None:
+    path = entry.get("path")
+    if not isinstance(path, str):
+        raise PublicationBoundaryError(f"completed manifest has invalid {field}")
+    if path in indexed:
+        raise PublicationBoundaryError(f"completed manifest has invalid {field}")
+    indexed[path] = entry
+
+
+def _valid_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_staged_file(
+    path: Path,
+    run_root: Path,
+    artifact_inventory: dict[str, dict[str, object]],
+    parquet_inventory: dict[str, dict[str, object]],
+) -> None:
+    try:
+        relative = str(path.relative_to(run_root))
+    except ValueError as exc:
+        raise PublicationBoundaryError(f"staged artifact is outside completed run: {path}") from exc
+    expected = _required_manifest_entry(artifact_inventory, relative, "staged artifact")
+    if not _artifact_matches_manifest(path, expected):
+        raise PublicationBoundaryError(
+            f"staged artifact differs from completed manifest: {relative}"
+        )
+    if path.suffix == ".parquet":
+        _validate_staged_parquet(path, relative, parquet_inventory)
+
+
+def _required_manifest_entry(
+    inventory: dict[str, dict[str, object]], relative: str, description: str
+) -> dict[str, object]:
+    expected = inventory.get(relative)
+    if expected is None:
+        raise PublicationBoundaryError(
+            f"{description} is not present in completed manifest: {relative}"
+        )
+    return expected
+
+
+def _artifact_matches_manifest(path: Path, expected: dict[str, object]) -> bool:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return (
+        path.is_file()
+        and stat.st_size == expected["size_bytes"]
+        and stat.st_mtime_ns == expected["mtime_ns"]
+        and _sha256(path) == expected["sha256"]
+    )
+
+
+def _validate_staged_parquet(
+    path: Path, relative: str, parquet_inventory: dict[str, dict[str, object]]
+) -> None:
+    expected = _required_manifest_entry(parquet_inventory, relative, "staged Parquet")
+    try:
+        metadata = pq.ParquetFile(path).metadata
+    except (OSError, ValueError, pa.ArrowException) as exc:
+        raise PublicationBoundaryError(f"staged Parquet cannot be validated: {relative}") from exc
+    if metadata is None or metadata.num_rows != expected["row_count"]:
+        raise PublicationBoundaryError(f"staged Parquet row count differs: {relative}")
+
+
+def _validate_staging_integrity(
+    run_root: Path,
+    global_files: tuple[Path, ...],
+    summary_files: tuple[Path, ...],
+    manifest: dict[str, object],
+) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    artifact_inventory = _manifest_inventory(
+        manifest,
+        field="generated_artifact_inventory",
+        count_field="generated_artifact_count",
+        include_row_count=False,
+    )
+    parquet_inventory = _manifest_inventory(
+        manifest,
+        field="generated_parquet_inventory",
+        count_field="generated_parquet_count",
+        include_row_count=True,
+    )
+    for path in (*global_files, *summary_files):
+        _validate_staged_file(path, run_root, artifact_inventory, parquet_inventory)
+    return artifact_inventory, parquet_inventory
 
 
 def _copy_staging_files(
@@ -368,7 +536,12 @@ def _validate_summary_geometry(payload: dict[str, object]) -> None:
         raise PublicationBoundaryError("summary JSON has invalid geometry summary fields")
 
 
-def _copy_summary_json(run_root: Path, destination: Path) -> None:
+def _copy_summary_json(
+    run_root: Path,
+    destination: Path,
+    *,
+    artifact_inventory: dict[str, dict[str, object]] | None = None,
+) -> None:
     summary_json = run_root / "reports" / "summary.json"
     if summary_json.is_file():
         try:
@@ -376,6 +549,13 @@ def _copy_summary_json(run_root: Path, destination: Path) -> None:
         except (OSError, json.JSONDecodeError) as exc:
             raise PublicationBoundaryError("summary JSON is not valid JSON") from exc
         _validate_summary_payload(payload)
+        if artifact_inventory is not None:
+            relative = str(summary_json.relative_to(run_root))
+            expected = _required_manifest_entry(artifact_inventory, relative, "summary JSON")
+            if not _artifact_matches_manifest(summary_json, expected):
+                raise PublicationBoundaryError(
+                    f"summary JSON differs from completed manifest: {relative}"
+                )
         shutil.copy2(summary_json, destination / "data" / "summary.json")
 
 
@@ -384,15 +564,20 @@ def stage_hf(run_root: Path, destination: Path) -> Path:
 
     run_root = run_root.absolute()
     destination = destination.absolute()
-    _check_completed_run(run_root)
-    _prepare_destination(destination)
+    manifest = _check_completed_run(run_root)
     global_files, summary_files = _staging_files(run_root)
     _validate_staging_files(global_files, summary_files)
-    _copy_staging_files(destination, global_files, summary_files)
-    _copy_summary_json(run_root, destination)
-    run_id = json.loads((run_root / "manifests" / "manifest.json").read_bytes()).get(
-        "run_id", run_root.name
+    artifact_inventory, _ = _validate_staging_integrity(
+        run_root, global_files, summary_files, manifest
     )
+    _prepare_destination(destination)
+    _copy_staging_files(destination, global_files, summary_files)
+    _copy_summary_json(
+        run_root,
+        destination,
+        artifact_inventory=artifact_inventory,
+    )
+    run_id = manifest.get("run_id", run_root.name)
     (destination / "README.md").write_text(_dataset_card(str(run_id)), encoding="utf-8")
     shutil.copy2(_repository_file("CITATION.cff"), destination / "CITATION.cff")
     shutil.copy2(_repository_file("LICENSE"), destination / "LICENSE")

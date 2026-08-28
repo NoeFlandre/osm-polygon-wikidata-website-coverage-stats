@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import Occurrence
 from osm_polygon_wikidata_website_coverage.io.parquet import (
+    FAILURE_SCHEMA,
+    OCCURRENCE_SCHEMA,
     FailureShardWriter,
     OccurrenceShardWriter,
 )
 from osm_polygon_wikidata_website_coverage.io.pbf import Result, scan_pbf, scan_pbf_keys
 
 Scanner = Callable[[Path, Callable[[Result], None]], None]
+MAX_WORKERS = 8
+GEOMETRY_SCANNER_MODE = "geometry"
+COVERAGE_ONLY_SCANNER_MODE = "coverage-only"
 
 
 class ExtractionError(RuntimeError):
@@ -72,10 +82,24 @@ class _SourceExtraction:
     source_inventory: SourceInventory
 
 
+def scanner_mode(scanner: Scanner | None) -> str:
+    """Return the persisted extraction mode used for checkpoint compatibility."""
+
+    if scanner is scan_pbf_keys:
+        return COVERAGE_ONLY_SCANNER_MODE
+    return GEOMETRY_SCANNER_MODE
+
+
+def regular_pbf_files(raw_root: Path) -> tuple[Path, ...]:
+    """Return only regular PBF files from a raw input directory."""
+
+    return tuple(sorted(path for path in raw_root.glob("*.osm.pbf") if path.is_file()))
+
+
 def _pbf_files(raw_root: Path) -> tuple[Path, ...]:
     if not raw_root.is_dir():
         raise ExtractionError(f"raw PBF root is not a directory: {raw_root}")
-    files = _regular_pbf_files(raw_root)
+    files = regular_pbf_files(raw_root)
     if not files:
         raise ExtractionError(f"raw PBF root contains no regular PBF files: {raw_root}")
     unreadable = _unreadable_pbf_files(files)
@@ -83,14 +107,6 @@ def _pbf_files(raw_root: Path) -> tuple[Path, ...]:
         names = ", ".join(path.name for path in unreadable)
         raise ExtractionError(f"raw PBF files are unreadable: {names}")
     return files
-
-
-def _regular_pbf_files(raw_root: Path) -> tuple[Path, ...]:
-    return tuple(
-        sorted(
-            (path for path in raw_root.glob("*.osm.pbf") if path.is_file()),
-        )
-    )
 
 
 def _unreadable_pbf_files(files: tuple[Path, ...]) -> tuple[Path, ...]:
@@ -144,7 +160,7 @@ def _source_temporary_paths(run_root: Path, directory: str, source_stem: str) ->
 
 
 def _nonnegative_count(value: object) -> int | None:
-    if not isinstance(value, int) or value < 0:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return None
     return value
 
@@ -155,6 +171,218 @@ def _checkpoint_counts(occurrence_count: object, failure_count: object) -> tuple
     if occurrence is None or failure is None:
         return None
     return occurrence, failure
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _checkpoint_shard_inventory(
+    run_root: Path, pbf_path: Path, directory: str
+) -> list[dict[str, object]]:
+    source_stem = _source_stem(pbf_path)
+    inventory: list[dict[str, object]] = []
+    for path in _source_output_paths(run_root, directory, source_stem):
+        metadata = pq.ParquetFile(path).metadata
+        if metadata is None or metadata.num_rows < 0:
+            raise ExtractionError(f"invalid extracted Parquet metadata: {path}")
+        stat = path.stat()
+        inventory.append(
+            {
+                "path": str(path.relative_to(run_root)),
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "row_count": metadata.num_rows,
+                "sha256": _sha256(path),
+            }
+        )
+    return inventory
+
+
+def _checkpoint_inventory(payload: dict[str, object], field: str) -> list[dict[str, object]] | None:
+    value = payload.get(field)
+    if not isinstance(value, list):
+        return None
+    inventory: list[dict[str, object]] = []
+    expected_fields = {"path", "size_bytes", "mtime_ns", "row_count", "sha256"}
+    for item in value:
+        entry = _checkpoint_entry(item, expected_fields)
+        if entry is None:
+            return None
+        inventory.append(entry)
+    return inventory
+
+
+def _checkpoint_entry(item: object, expected_fields: set[str]) -> dict[str, object] | None:
+    entry = _checkpoint_entry_shape(item, expected_fields)
+    if entry is None:
+        return None
+    if not isinstance(entry["path"], str):
+        return None
+    if not _checkpoint_numbers_valid(entry):
+        return None
+    if not _valid_sha256(entry["sha256"]):
+        return None
+    return entry
+
+
+def _checkpoint_entry_shape(item: object, expected_fields: set[str]) -> dict[str, object] | None:
+    if not isinstance(item, dict):
+        return None
+    entry = item
+    if set(entry) != expected_fields:
+        return None
+    return entry
+
+
+def _checkpoint_numbers_valid(entry: dict[str, object]) -> bool:
+    return all(
+        _nonnegative_count(entry[field]) is not None
+        for field in ("size_bytes", "mtime_ns", "row_count")
+    )
+
+
+def _valid_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _checkpoint_outputs_match(
+    payload: dict[str, object],
+    run_root: Path,
+    pbf_path: Path,
+    occurrence_count: int,
+    failure_count: int,
+) -> bool:
+    source_stem = _source_stem(pbf_path)
+    families = (
+        ("occurrence_shards", "occurrences", OCCURRENCE_SCHEMA, occurrence_count),
+        ("failure_shards", "geometry-failures", FAILURE_SCHEMA, failure_count),
+    )
+    for field, directory, expected_schema, expected_count in families:
+        if not _checkpoint_family_matches(
+            payload,
+            run_root,
+            source_stem,
+            field,
+            directory,
+            expected_schema,
+            expected_count,
+        ):
+            return False
+    return True
+
+
+def _checkpoint_family_matches(
+    payload: dict[str, object],
+    run_root: Path,
+    source_stem: str,
+    field: str,
+    directory: str,
+    expected_schema: pa.Schema,
+    expected_count: int,
+) -> bool:
+    if not _checkpoint_family_ready(payload, run_root, source_stem, field, directory):
+        return False
+    inventory = _checkpoint_inventory(payload, field)
+    if inventory is None:
+        return False
+    return _checkpoint_files_match(inventory, run_root, directory, expected_schema, expected_count)
+
+
+def _checkpoint_family_ready(
+    payload: dict[str, object],
+    run_root: Path,
+    source_stem: str,
+    field: str,
+    directory: str,
+) -> bool:
+    inventory = _checkpoint_inventory(payload, field)
+    if not inventory:
+        return False
+    actual_paths = _source_output_paths(run_root, directory, source_stem)
+    if not _checkpoint_paths_match(actual_paths, inventory, run_root):
+        return False
+    return not _source_temporary_paths(run_root, directory, source_stem)
+
+
+def _checkpoint_paths_match(
+    actual_paths: tuple[Path, ...], inventory: list[dict[str, object]], run_root: Path
+) -> bool:
+    return tuple(str(path.relative_to(run_root)) for path in actual_paths) == tuple(
+        entry["path"] for entry in inventory
+    )
+
+
+def _checkpoint_files_match(
+    inventory: list[dict[str, object]],
+    run_root: Path,
+    directory: str,
+    expected_schema: pa.Schema,
+    expected_count: int,
+) -> bool:
+    row_count = 0
+    try:
+        for entry in inventory:
+            if not _checkpoint_file_matches(entry, run_root, directory, expected_schema):
+                return False
+            count = _nonnegative_count(entry["row_count"])
+            if count is None:
+                return False
+            row_count += count
+    except (OSError, ValueError, pa.ArrowException):
+        return False
+    return row_count == expected_count
+
+
+def _checkpoint_file_matches(
+    entry: dict[str, object],
+    run_root: Path,
+    directory: str,
+    expected_schema: pa.Schema,
+) -> bool:
+    path_value = entry.get("path")
+    if not isinstance(path_value, str):
+        return False
+    path = run_root / path_value
+    if path.parent != run_root / directory or not path.is_file():
+        return False
+    if not _checkpoint_file_metadata_matches(path, entry):
+        return False
+    return _checkpoint_parquet_matches(path, entry, expected_schema)
+
+
+def _checkpoint_parquet_matches(
+    path: Path, entry: dict[str, object], expected_schema: pa.Schema
+) -> bool:
+    metadata = pq.ParquetFile(path).metadata
+    if metadata is None:
+        return False
+    if metadata.num_rows != entry["row_count"]:
+        return False
+    return _schema_matches(pq.read_schema(path), expected_schema)
+
+
+def _checkpoint_file_metadata_matches(path: Path, entry: dict[str, object]) -> bool:
+    stat = path.stat()
+    return (
+        stat.st_size == entry["size_bytes"]
+        and stat.st_mtime_ns == entry["mtime_ns"]
+        and _sha256(path) == entry["sha256"]
+    )
+
+
+def _schema_matches(actual: pa.Schema, expected: pa.Schema) -> bool:
+    return actual.names == expected.names and [field.type for field in actual] == [
+        field.type for field in expected
+    ]
 
 
 def _remove_incomplete_outputs(run_root: Path, pbf_path: Path) -> None:
@@ -170,19 +398,29 @@ def _remove_incomplete_outputs(run_root: Path, pbf_path: Path) -> None:
     checkpoint.with_name(f".{checkpoint.name}.tmp").unlink(missing_ok=True)
 
 
-def _write_checkpoint(checkpoint_root: Path, pbf_path: Path, extraction: _SourceExtraction) -> None:
+def _write_checkpoint(
+    checkpoint_root: Path,
+    pbf_path: Path,
+    extraction: _SourceExtraction,
+    *,
+    scanner_mode: str = GEOMETRY_SCANNER_MODE,
+) -> None:
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     checkpoint = _checkpoint_path(checkpoint_root, pbf_path)
     temporary = checkpoint.with_name(f".{checkpoint.name}.tmp")
     if checkpoint.exists() or temporary.exists():
         raise FileExistsError(f"refusing to overwrite extraction checkpoint: {checkpoint}")
     snapshot = extraction.source_inventory.before
+    run_root = checkpoint_root.parent
     payload = {
         "source_pbf": pbf_path.name,
         "size_bytes": snapshot.size_bytes,
         "mtime_ns": snapshot.mtime_ns,
         "occurrence_count": extraction.occurrence_count,
         "failure_count": extraction.failure_count,
+        "scanner_mode": scanner_mode,
+        "occurrence_shards": _checkpoint_shard_inventory(run_root, pbf_path, "occurrences"),
+        "failure_shards": _checkpoint_shard_inventory(run_root, pbf_path, "geometry-failures"),
     }
     temporary.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
     os.replace(temporary, checkpoint)
@@ -215,7 +453,11 @@ def _load_checkpoint_payload(
 
 
 def _read_checkpoint(
-    checkpoint_root: Path, run_root: Path, pbf_path: Path
+    checkpoint_root: Path,
+    run_root: Path,
+    pbf_path: Path,
+    *,
+    scanner_mode: str = GEOMETRY_SCANNER_MODE,
 ) -> _SourceExtraction | None:
     checkpoint = _checkpoint_path(checkpoint_root, pbf_path)
     temporary = checkpoint.with_name(f".{checkpoint.name}.tmp")
@@ -229,12 +471,13 @@ def _read_checkpoint(
         current,
         occurrence_count,
         failure_count,
+        scanner_mode=scanner_mode,
     ):
         return None
-    source_stem = _source_stem(pbf_path)
-    if not _source_output_paths(run_root, "occurrences", source_stem):
-        return None
-    if not _source_output_paths(run_root, "geometry-failures", source_stem):
+    checkpoint_payload = payload
+    if not _checkpoint_outputs_match(
+        checkpoint_payload, run_root, pbf_path, occurrence_count, failure_count
+    ):
         return None
     return _SourceExtraction(
         occurrence_count,
@@ -249,16 +492,29 @@ def _checkpoint_matches(
     current: SourceSnapshot,
     occurrence_count: object,
     failure_count: object,
-) -> bool:
+    *,
+    scanner_mode: str = GEOMETRY_SCANNER_MODE,
+) -> TypeGuard[dict[str, object]]:
     if _checkpoint_counts(occurrence_count, failure_count) is None:
         return False
     if not isinstance(payload, dict):
         return False
-    return (
-        payload.get("source_pbf") == pbf_path.name
-        and payload.get("size_bytes") == current.size_bytes
-        and payload.get("mtime_ns") == current.mtime_ns
-    )
+    return _checkpoint_identity_matches(payload, pbf_path, current, scanner_mode)
+
+
+def _checkpoint_identity_matches(
+    payload: dict[object, object],
+    pbf_path: Path,
+    current: SourceSnapshot,
+    scanner_mode: str,
+) -> bool:
+    if payload.get("source_pbf") != pbf_path.name:
+        return False
+    if payload.get("size_bytes") != current.size_bytes:
+        return False
+    if payload.get("mtime_ns") != current.mtime_ns:
+        return False
+    return payload.get("scanner_mode") == scanner_mode
 
 
 def _extract_one(
@@ -293,7 +549,12 @@ def _extract_one(
     _assert_unchanged(before, after)
     extraction = _SourceExtraction(occurrence_count, failure_count, SourceInventory(before, after))
     if checkpoint_root is not None:
-        _write_checkpoint(checkpoint_root, pbf_path, extraction)
+        _write_checkpoint(
+            checkpoint_root,
+            pbf_path,
+            extraction,
+            scanner_mode=scanner_mode(scanner),
+        )
     return extraction
 
 
@@ -323,6 +584,8 @@ def _extract_in_parallel(
 def _validate_worker_configuration(workers: int, scanner: Scanner) -> None:
     if workers < 1:
         raise ValueError("workers must be positive")
+    if workers > MAX_WORKERS:
+        raise ValueError(f"workers must be <= {MAX_WORKERS}")
     if workers > 1 and scanner not in (scan_pbf, scan_pbf_keys):
         raise ExtractionError("parallel extraction requires the default scanner")
 
@@ -363,13 +626,22 @@ def _prepare_run_root(run_root: Path, resume: bool) -> Path | None:
 
 
 def _partition_sources(
-    pbf_files: tuple[Path, ...], checkpoint_root: Path | None, run_root: Path
+    pbf_files: tuple[Path, ...],
+    checkpoint_root: Path | None,
+    run_root: Path,
+    *,
+    scanner_mode: str = GEOMETRY_SCANNER_MODE,
 ) -> tuple[dict[Path, _SourceExtraction], tuple[Path, ...]]:
     completed: dict[Path, _SourceExtraction] = {}
     pending: list[Path] = []
     for pbf_path in pbf_files:
         saved = (
-            _read_checkpoint(checkpoint_root, run_root, pbf_path)
+            _read_checkpoint(
+                checkpoint_root,
+                run_root,
+                pbf_path,
+                scanner_mode=scanner_mode,
+            )
             if checkpoint_root is not None
             else None
         )
@@ -397,7 +669,12 @@ def extract_all(
     pbf_files = _pbf_files(paths.raw_pbf_root)
     run_root = paths.run_root(run_id)
     checkpoint_root = _prepare_run_root(run_root, resume)
-    completed, pending = _partition_sources(pbf_files, checkpoint_root, run_root)
+    completed, pending = _partition_sources(
+        pbf_files,
+        checkpoint_root,
+        run_root,
+        scanner_mode=scanner_mode(scanner),
+    )
 
     extractions = _extract_sources(pending, run_root, batch_rows, scanner, workers, checkpoint_root)
     completed.update(zip(pending, extractions, strict=True))

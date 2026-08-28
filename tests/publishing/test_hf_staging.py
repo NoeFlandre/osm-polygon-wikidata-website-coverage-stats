@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -19,18 +20,31 @@ from osm_polygon_wikidata_website_coverage.pipeline.aggregate import (
 )
 from osm_polygon_wikidata_website_coverage.publishing.hf import (
     PublicationBoundaryError,
+    _add_manifest_entry,
+    _artifact_matches_manifest,
     _check_completed_run,
     _copy_staging_files,
     _copy_summary_json,
+    _manifest_entry,
+    _manifest_entry_values_valid,
+    _manifest_inventory,
+    _manifest_list,
     _parquet_files,
     _prepare_destination,
     _repository_file,
     _staging_files,
+    _valid_sha256,
     _validate_exact_schema,
     _validate_schema,
+    _validate_staged_file,
+    _validate_staged_parquet,
     _validate_staging_files,
+    _validate_staging_integrity,
     _validate_summary_payload,
     stage_hf,
+)
+from osm_polygon_wikidata_website_coverage.publishing.hf import (
+    _sha256 as hf_sha256,
 )
 
 
@@ -137,8 +151,43 @@ def _write_run(tmp_path: Path, *, include_forbidden: bool = False) -> Path:
     }
     for name, (schema, rows) in summary_rows.items():
         pq.write_table(pa.Table.from_pylist(rows, schema=schema), run / "summaries" / name)
+    generated_parquets = []
+    generated_artifacts = []
+    for path in sorted(run.rglob("*")):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        generated_artifacts.append(
+            {
+                "path": str(path.relative_to(run)),
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "sha256": digest,
+            }
+        )
+        if path.suffix == ".parquet":
+            generated_parquets.append(
+                {
+                    "path": str(path.relative_to(run)),
+                    "size_bytes": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "row_count": pq.ParquetFile(path).metadata.num_rows,
+                    "sha256": digest,
+                }
+            )
     (run / "manifests" / "manifest.json").write_text(
-        json.dumps({"status": "complete", "run_id": "fixture"}), encoding="utf-8"
+        json.dumps(
+            {
+                "status": "complete",
+                "run_id": "fixture",
+                "generated_parquet_count": len(generated_parquets),
+                "generated_parquet_inventory": generated_parquets,
+                "generated_artifact_count": len(generated_artifacts),
+                "generated_artifact_inventory": generated_artifacts,
+            }
+        ),
+        encoding="utf-8",
     )
     return run
 
@@ -148,6 +197,23 @@ def _schema_names(stage: Path) -> set[str]:
     for path in stage.rglob("*.parquet"):
         names.update(pq.read_schema(path).names)
     return names
+
+
+def _add_file_to_manifest(run: Path, path: Path) -> None:
+    manifest_path = run / "manifests" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stat = path.stat()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest["generated_artifact_inventory"].append(
+        {
+            "path": str(path.relative_to(run)),
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest,
+        }
+    )
+    manifest["generated_artifact_count"] += 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _valid_summary() -> dict[str, object]:
@@ -289,13 +355,27 @@ def test_hf_staging_rejects_an_unapproved_summary_file(tmp_path: Path) -> None:
         stage_hf(run, tmp_path / "hf")
 
 
+def test_hf_staging_rejects_a_staged_file_changed_after_manifest_completion(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path)
+    path = run / "coverage" / "global" / "shard-00.parquet"
+    table = pq.read_table(path)
+    pq.write_table(table, path, compression="snappy")
+
+    with pytest.raises(PublicationBoundaryError, match="manifest"):
+        stage_hf(run, tmp_path / "hf")
+
+
 def test_hf_staging_copies_optional_summary_json_and_uses_run_name_fallback(tmp_path: Path) -> None:
     run = _write_run(tmp_path)
     (run / "reports").mkdir()
-    (run / "reports" / "summary.json").write_text(json.dumps(_valid_summary()), encoding="utf-8")
-    (run / "manifests" / "manifest.json").write_text(
-        json.dumps({"status": "complete"}), encoding="utf-8"
-    )
+    summary_json = run / "reports" / "summary.json"
+    summary_json.write_text(json.dumps(_valid_summary()), encoding="utf-8")
+    _add_file_to_manifest(run, summary_json)
+    manifest = json.loads((run / "manifests" / "manifest.json").read_text(encoding="utf-8"))
+    manifest.pop("run_id")
+    (run / "manifests" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     stage = stage_hf(run, tmp_path / "hf")
 
@@ -312,6 +392,19 @@ def test_hf_publication_reports_missing_repository_files(tmp_path: Path) -> None
         "repository publication file is missing: "
         f"{Path(__file__).parents[2] / 'definitely-missing-publication-file'}"
     )
+
+
+def test_hf_repository_file_resolves_package_root_in_an_installed_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package_root = tmp_path / "site-packages" / "osm_polygon_wikidata_website_coverage"
+    publishing_root = package_root / "publishing"
+    publishing_root.mkdir(parents=True)
+    citation = package_root / "CITATION.cff"
+    citation.write_text("cff", encoding="utf-8")
+    monkeypatch.setattr(hf_module, "__file__", str(publishing_root / "hf.py"))
+
+    assert _repository_file("CITATION.cff") == citation
 
 
 def test_hf_private_helpers_have_exact_paths_and_error_contracts(tmp_path: Path) -> None:
@@ -552,7 +645,9 @@ def test_hf_summary_copy_and_stage_preserve_exact_names_and_utf8(
     reports = run / "reports"
     reports.mkdir()
     summary_text = json.dumps(_valid_summary(), ensure_ascii=False)
-    (reports / "summary.json").write_text(summary_text, encoding="utf-8")
+    summary_json = reports / "summary.json"
+    summary_json.write_text(summary_text, encoding="utf-8")
+    _add_file_to_manifest(run, summary_json)
     destination = tmp_path / "summary-stage"
     (destination / "data").mkdir(parents=True)
     _copy_summary_json(run, destination)
@@ -613,6 +708,286 @@ def test_hf_manifest_check_uses_exact_path_components() -> None:
     _check_completed_run(cast(Path, FakePath()))
 
     assert components == ["manifests", "manifest.json"]
+
+
+def test_hf_manifest_artifact_inventory_rejects_invalid_shapes_and_values() -> None:
+    entry: dict[str, object] = {
+        "path": "coverage/global/shard-00.parquet",
+        "size_bytes": 1,
+        "mtime_ns": 1,
+        "sha256": "0" * 64,
+    }
+
+    cases: list[dict[str, object]] = [
+        {},
+        {"generated_artifact_count": 0, "generated_artifact_inventory": "wrong"},
+        {"generated_artifact_count": "1", "generated_artifact_inventory": [entry]},
+        {"generated_artifact_count": 0, "generated_artifact_inventory": [entry]},
+        {"generated_artifact_count": 1, "generated_artifact_inventory": [None]},
+        {"generated_artifact_count": 1, "generated_artifact_inventory": [{"path": "only"}]},
+        {
+            "generated_artifact_count": 1,
+            "generated_artifact_inventory": [{**entry, "size_bytes": -1}],
+        },
+        {
+            "generated_artifact_count": 2,
+            "generated_artifact_inventory": [entry, entry],
+        },
+    ]
+    for payload in cases:
+        with pytest.raises(PublicationBoundaryError, match="generated_artifact_inventory"):
+            _manifest_inventory(
+                payload,
+                field="generated_artifact_inventory",
+                count_field="generated_artifact_count",
+                include_row_count=False,
+            )
+
+
+def test_hf_manifest_inventory_accepts_exact_artifact_and_parquet_entries() -> None:
+    artifact_entry: dict[str, object] = {
+        "path": "reports/report.md",
+        "size_bytes": 3,
+        "mtime_ns": 4,
+        "sha256": "a" * 64,
+    }
+    parquet_entry = {**artifact_entry, "row_count": 5}
+
+    assert _manifest_inventory(
+        {"count": 1, "entries": [artifact_entry]},
+        field="entries",
+        count_field="count",
+        include_row_count=False,
+    ) == {artifact_entry["path"]: artifact_entry}
+    assert _manifest_inventory(
+        {"count": 1, "entries": [parquet_entry]},
+        field="entries",
+        count_field="count",
+        include_row_count=True,
+    ) == {parquet_entry["path"]: parquet_entry}
+    with pytest.raises(PublicationBoundaryError, match="invalid entries"):
+        _manifest_inventory(
+            {"count": 1, "entries": [{**parquet_entry, "row_count": -1}]},
+            field="entries",
+            count_field="count",
+            include_row_count=True,
+        )
+
+
+def test_hf_manifest_helpers_have_explicit_valid_and_invalid_contracts() -> None:
+    entry: dict[str, object] = {
+        "path": "coverage/global/shard-00.parquet",
+        "size_bytes": 1,
+        "mtime_ns": 2,
+        "sha256": "0" * 64,
+    }
+    parquet_entry = {**entry, "row_count": 3}
+
+    assert _manifest_list({"entries": [entry], "count": 1}, "entries", "count") == [entry]
+    assert _manifest_list({"entries": [entry], "count": 0}, "entries", "count") is None
+    assert _manifest_list({"entries": "wrong", "count": 1}, "entries", "count") is None
+    assert _manifest_list({"entries": [entry], "count": True}, "entries", "count") is None
+
+    assert _manifest_entry(entry, set(entry), False) == entry
+    assert _manifest_entry(parquet_entry, set(parquet_entry), True) == parquet_entry
+    assert _manifest_entry(entry, set(parquet_entry), True) is None
+    assert _manifest_entry_values_valid(entry, False) is True
+    assert _manifest_entry_values_valid(parquet_entry, True) is True
+    for field in ("path", "size_bytes", "mtime_ns", "sha256"):
+        invalid: dict[str, object] = dict(entry)
+        invalid[field] = None
+        assert _manifest_entry_values_valid(invalid, False) is False
+    invalid_row_count: dict[str, object] = dict(parquet_entry)
+    invalid_row_count["row_count"] = -1
+    assert _manifest_entry_values_valid(invalid_row_count, True) is False
+    invalid_size: dict[str, object] = dict(parquet_entry)
+    invalid_size["size_bytes"] = -1
+    assert _manifest_entry_values_valid(invalid_size, True) is False
+    invalid_mtime: dict[str, object] = dict(parquet_entry)
+    invalid_mtime["mtime_ns"] = -1
+    assert _manifest_entry_values_valid(invalid_mtime, True) is False
+    assert _manifest_entry_values_valid(entry, cast(bool, None)) is False
+
+    indexed: dict[str, dict[str, object]] = {}
+    _add_manifest_entry(indexed, entry, "entries")
+    assert indexed == {entry["path"]: entry}
+    with pytest.raises(PublicationBoundaryError) as duplicate:
+        _add_manifest_entry(indexed, entry, "entries")
+    assert str(duplicate.value) == "completed manifest has invalid entries"
+    with pytest.raises(PublicationBoundaryError) as invalid_path:
+        _add_manifest_entry(indexed, {**entry, "path": None}, "entries")
+    assert str(invalid_path.value) == "completed manifest has invalid entries"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0" * 64, True),
+        ("f" * 64, True),
+        (None, False),
+        ("0" * 63, False),
+        ("0" * 65, False),
+        ("G" * 64, False),
+        ("X" * 64, False),
+        ("A" * 64, False),
+    ],
+)
+def test_hf_sha256_validation_is_lowercase_hex_with_exact_length(
+    value: object, expected: bool
+) -> None:
+    assert _valid_sha256(value) is expected
+
+
+def test_hf_sha256_reads_bounded_chunks_and_returns_the_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Stream:
+        def __init__(self) -> None:
+            self.sizes: list[int | None] = []
+            self.chunks = iter((b"first", b"second", b""))
+
+        def __enter__(self) -> "Stream":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self, size: int | None = None) -> bytes:
+            self.sizes.append(size)
+            return next(self.chunks)
+
+    class Hash:
+        def __init__(self) -> None:
+            self.updates: list[bytes] = []
+
+        def update(self, chunk: bytes) -> None:
+            self.updates.append(chunk)
+
+        def hexdigest(self) -> str:
+            return "digest"
+
+    stream = Stream()
+    digest = Hash()
+
+    class File:
+        def open(self, mode: str) -> Stream:
+            assert mode == "rb"
+            return stream
+
+    monkeypatch.setattr(hf_module.hashlib, "sha256", lambda: digest)
+
+    assert hf_sha256(cast(Path, File())) == "digest"
+    assert stream.sizes == [8 * 1024 * 1024, 8 * 1024 * 1024, 8 * 1024 * 1024]
+    assert digest.updates == [b"first", b"second"]
+
+
+def test_hf_completed_manifest_loader_returns_payload_and_exact_array_error(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    manifest = run / "manifests" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    payload = {"status": "complete", "run_id": "fixture"}
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _check_completed_run(run) == payload
+    manifest.write_text("[]", encoding="utf-8")
+    with pytest.raises(PublicationBoundaryError) as error:
+        _check_completed_run(run)
+    assert str(error.value) == "completed manifest is not a JSON object"
+
+
+def test_hf_completed_manifest_rejects_a_json_array(tmp_path: Path) -> None:
+    manifest = tmp_path / "run" / "manifests" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(PublicationBoundaryError, match="JSON object"):
+        _check_completed_run(manifest.parents[1])
+
+
+def test_hf_staged_artifact_helpers_fail_closed_on_missing_or_invalid_files(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path)
+    with pytest.raises(PublicationBoundaryError, match="outside completed run"):
+        _validate_staged_file(tmp_path / "missing.parquet", run, {}, {})
+    with pytest.raises(PublicationBoundaryError, match="not present"):
+        _validate_staged_file(run / "missing.parquet", run, {}, {})
+
+    assert _artifact_matches_manifest(tmp_path / "missing.bin", {}) is False
+
+    manifest = json.loads((run / "manifests" / "manifest.json").read_text(encoding="utf-8"))
+    valid_artifact = next(
+        item
+        for item in manifest["generated_artifact_inventory"]
+        if item["path"] == "coverage/global/shard-00.parquet"
+    )
+    valid_parquet = next(
+        item
+        for item in manifest["generated_parquet_inventory"]
+        if item["path"] == "coverage/global/shard-00.parquet"
+    )
+    valid = run / "coverage/global/shard-00.parquet"
+    assert _artifact_matches_manifest(valid, valid_artifact) is True
+    assert _artifact_matches_manifest(valid, {**valid_artifact, "size_bytes": 0}) is False
+    assert _artifact_matches_manifest(valid, {**valid_artifact, "mtime_ns": 0}) is False
+    assert _artifact_matches_manifest(valid, {**valid_artifact, "sha256": "0" * 64}) is False
+    _validate_staged_parquet(valid, valid_parquet["path"], {valid_parquet["path"]: valid_parquet})
+    with pytest.raises(PublicationBoundaryError) as missing_parquet:
+        _validate_staged_parquet(valid, "missing.parquet", {})
+    assert str(missing_parquet.value) == (
+        "staged Parquet is not present in completed manifest: missing.parquet"
+    )
+
+    invalid = tmp_path / "invalid.parquet"
+    invalid.write_bytes(b"not parquet")
+    with pytest.raises(PublicationBoundaryError, match="cannot be validated"):
+        _validate_staged_parquet(invalid, "invalid.parquet", {"invalid.parquet": {"row_count": 0}})
+
+    valid = run / "coverage" / "global" / "shard-00.parquet"
+    with pytest.raises(PublicationBoundaryError, match="row count differs"):
+        _validate_staged_parquet(
+            valid,
+            "coverage/global/shard-00.parquet",
+            {"coverage/global/shard-00.parquet": {"row_count": 0}},
+        )
+
+
+def test_hf_staging_integrity_accepts_the_complete_manifest_inventory(tmp_path: Path) -> None:
+    run = _write_run(tmp_path)
+    manifest = json.loads((run / "manifests" / "manifest.json").read_text(encoding="utf-8"))
+    global_files, summary_files = _staging_files(run)
+
+    artifacts, parquets = _validate_staging_integrity(run, global_files, summary_files, manifest)
+
+    assert artifacts["coverage/global/shard-00.parquet"]["sha256"]
+    assert parquets["coverage/global/shard-00.parquet"]["row_count"] == 1
+    _validate_staged_file(run / "coverage/global/shard-00.parquet", run, artifacts, parquets)
+
+
+def test_hf_staged_file_validation_checks_regular_and_parquet_files_exactly(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path)
+    note = run / "notes.txt"
+    note.write_text("note", encoding="utf-8")
+    _add_file_to_manifest(run, note)
+    manifest = json.loads((run / "manifests" / "manifest.json").read_text(encoding="utf-8"))
+    artifacts = {item["path"]: item for item in manifest["generated_artifact_inventory"]}
+    parquets = {item["path"]: item for item in manifest["generated_parquet_inventory"]}
+
+    _validate_staged_file(note, run, artifacts, parquets)
+    with pytest.raises(PublicationBoundaryError) as missing:
+        _validate_staged_file(note, run, {}, parquets)
+    assert str(missing.value) == "staged artifact is not present in completed manifest: notes.txt"
+    parquet = run / "coverage/global/shard-00.parquet"
+    parquet_relative = "coverage/global/shard-00.parquet"
+    with pytest.raises(PublicationBoundaryError, match="row count differs"):
+        _validate_staged_file(
+            parquet,
+            run,
+            artifacts,
+            {parquet_relative: {**parquets[parquet_relative], "row_count": 0}},
+        )
 
 
 def test_hf_staging_file_helper_forwards_exact_descriptions(
@@ -688,6 +1063,36 @@ def test_hf_summary_json_copy_uses_exact_source_and_destination_paths(
     assert calls == [(summary_json, tmp_path / "stage/data/summary.json")]
 
 
+def test_hf_summary_json_copy_validates_an_optional_manifest_artifact(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path)
+    summary_json = run / "reports" / "summary.json"
+    summary_json.parent.mkdir(parents=True)
+    summary_json.write_text(json.dumps(_valid_summary()), encoding="utf-8")
+    _add_file_to_manifest(run, summary_json)
+    manifest = json.loads((run / "manifests" / "manifest.json").read_text(encoding="utf-8"))
+    artifacts = {item["path"]: item for item in manifest["generated_artifact_inventory"]}
+    destination = tmp_path / "stage"
+    (destination / "data").mkdir(parents=True)
+
+    _copy_summary_json(run, destination, artifact_inventory=artifacts)
+    assert (destination / "data/summary.json").is_file()
+
+    with pytest.raises(PublicationBoundaryError) as missing:
+        _copy_summary_json(run, tmp_path / "missing-stage", artifact_inventory={})
+    assert str(missing.value) == (
+        "summary JSON is not present in completed manifest: reports/summary.json"
+    )
+
+    summary_json.write_text(json.dumps({**_valid_summary(), "website_count": 2}), encoding="utf-8")
+    with pytest.raises(PublicationBoundaryError) as changed:
+        _copy_summary_json(run, tmp_path / "changed-stage", artifact_inventory=artifacts)
+    assert str(changed.value) == (
+        "summary JSON differs from completed manifest: reports/summary.json"
+    )
+
+
 def test_hf_summary_json_rejects_unapproved_fields(tmp_path: Path) -> None:
     run = tmp_path / "run"
     summary_json = run / "reports" / "summary.json"
@@ -723,10 +1128,19 @@ def test_stage_hf_forwards_exact_manifest_and_repository_file_names(
     copy_calls: list[tuple[Path, Path]] = []
     read_paths: list[Path] = []
     write_calls: list[tuple[Path, str, str | None]] = []
+    summary_kwargs: list[dict[str, object]] = []
     original_read_bytes = Path.read_bytes
 
-    def fake_check(run_root: Path) -> None:
+    def fake_check(run_root: Path) -> dict[str, object]:
         calls.append(("check", run_root))
+        return {
+            "status": "complete",
+            "run_id": "fixture",
+            "generated_artifact_count": 0,
+            "generated_artifact_inventory": [],
+            "generated_parquet_count": 0,
+            "generated_parquet_inventory": [],
+        }
 
     def fake_prepare(target: Path) -> None:
         calls.append(("prepare", target))
@@ -743,7 +1157,8 @@ def test_stage_hf_forwards_exact_manifest_and_repository_file_names(
     ) -> None:
         calls.append(("copy-files", (target, global_files, summary_files)))
 
-    def fake_copy_summary(run_root: Path, target: Path) -> None:
+    def fake_copy_summary(run_root: Path, target: Path, **kwargs: object) -> None:
+        summary_kwargs.append(dict(kwargs))
         calls.append(("copy-summary", (run_root, target)))
 
     def fake_repository_file(name: str) -> Path:
@@ -785,13 +1200,14 @@ def test_stage_hf_forwards_exact_manifest_and_repository_file_names(
     assert result == absolute_destination
     assert calls == [
         ("check", absolute_run),
-        ("prepare", absolute_destination),
         ("staging", absolute_run),
         ("validate", ((), ())),
+        ("prepare", absolute_destination),
         ("copy-files", (absolute_destination, (), ())),
         ("copy-summary", (absolute_run, absolute_destination)),
     ]
-    assert read_paths == [absolute_run / "manifests/manifest.json"]
+    assert read_paths == []
+    assert summary_kwargs == [{"artifact_inventory": {}}]
     assert repository_names == ["CITATION.cff", "LICENSE"]
     assert copy_calls == [
         (tmp_path / "repository/CITATION.cff", absolute_destination / "CITATION.cff"),

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,9 +15,9 @@ DEFAULT_WEBSITE_ROOT = (
 
 
 def _absolute(path: Path | str) -> Path:
-    """Make a path absolute while preserving symlink spelling."""
+    """Resolve a path so safety checks use its physical filesystem location."""
 
-    return Path(os.path.abspath(os.fspath(path)))
+    return Path(path).resolve(strict=False)
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -36,6 +35,8 @@ def _source_roots(
 
 
 def _validate_source_root(output_root: Path, source_root: Path) -> None:
+    output_root = _absolute(output_root)
+    source_root = _absolute(source_root)
     if not source_root.is_dir():
         raise ValueError(f"source root is not a directory: {source_root}")
     if _overlaps(output_root, source_root):
@@ -67,7 +68,7 @@ class DataPaths:
         website_root: Path | str = DEFAULT_WEBSITE_ROOT,
     ) -> DataPaths:
         output_root = _absolute(data_root)
-        if not _is_within(output_root, DEFAULT_PROJECTS_ROOT):
+        if not _is_within(output_root, _absolute(DEFAULT_PROJECTS_ROOT)):
             raise ValueError("data root must be under the Seagate projects volume")
 
         source_roots = _source_roots(raw_pbf_root, wikidata_root, website_root)
@@ -86,4 +87,8 @@ class DataPaths:
         """Return a safe run directory below the configured data root."""
 
         _validate_run_id(run_id)
-        return self.data_root / "runs" / run_id
+        data_root = _absolute(self.data_root)
+        run_root = _absolute(data_root / "runs" / run_id)
+        if not _is_within(run_root, data_root):
+            raise ValueError(f"run root escapes data root: {run_id!r}")
+        return run_root

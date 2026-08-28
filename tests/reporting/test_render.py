@@ -10,6 +10,7 @@ from osm_polygon_wikidata_website_coverage.reporting.render import (
     _category_rows,
     _render_area_chart,
     _render_coverage_chart,
+    _save_png,
     _write_report,
     _write_text,
     render_markdown,
@@ -263,6 +264,7 @@ def test_chart_renderers_pass_stable_plot_contracts(
 
         def savefig(self, path: Path, *, dpi: int, metadata: dict[str, str]) -> None:
             self.savefig_calls.append((path, dpi, metadata))
+            path.write_bytes(b"png")
 
     axes: list[Axis] = []
     figures: list[Figure] = []
@@ -325,9 +327,45 @@ def test_chart_renderers_pass_stable_plot_contracts(
     ]
     assert figures[0].tight_layout_calls == 1
     assert figures[1].tight_layout_calls == 1
-    assert figures[0].savefig_calls == [(coverage_path, 120, {"Software": "osm polygon coverage"})]
-    assert figures[1].savefig_calls == [(area_path, 120, {"Software": "osm polygon coverage"})]
+    assert figures[0].savefig_calls == [
+        (tmp_path / ".coverage.tmp.png", 120, {"Software": "osm polygon coverage"})
+    ]
+    assert figures[1].savefig_calls == [
+        (tmp_path / ".area.tmp.png", 120, {"Software": "osm polygon coverage"})
+    ]
     assert closed == figures
+
+
+def test_save_png_replaces_atomically_and_cleans_its_temporary_file(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[Path, int, dict[str, str]]] = []
+
+    class Figure:
+        def savefig(self, path: Path, *, dpi: int, metadata: dict[str, str]) -> None:
+            calls.append((path, dpi, metadata))
+            path.write_bytes(b"png")
+
+    output = tmp_path / "chart.png"
+    _save_png(Figure(), output)
+
+    assert calls == [(tmp_path / ".chart.tmp.png", 120, {"Software": "osm polygon coverage"})]
+    assert output.read_bytes() == b"png"
+    assert not (tmp_path / ".chart.tmp.png").exists()
+
+
+def test_save_png_cleans_a_partial_temporary_file_when_rendering_fails(
+    tmp_path: Path,
+) -> None:
+    class Figure:
+        def savefig(self, path: Path, *, dpi: int, metadata: dict[str, str]) -> None:
+            del dpi, metadata
+            path.write_bytes(b"partial")
+            raise RuntimeError("render failed")
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        _save_png(Figure(), tmp_path / "chart.png")
+    assert not (tmp_path / ".chart.tmp.png").exists()
 
 
 def test_coverage_chart_uses_the_original_label_for_unknown_categories(
@@ -354,7 +392,7 @@ def test_coverage_chart_uses_the_original_label_for_unknown_categories(
             pass
 
         def savefig(self, path: Path, *, dpi: int, metadata: dict[str, str]) -> None:
-            pass
+            path.write_bytes(b"png")
 
     axis = Axis()
     monkeypatch.setattr(render_module.plt, "subplots", lambda **kwargs: (Figure(), axis))

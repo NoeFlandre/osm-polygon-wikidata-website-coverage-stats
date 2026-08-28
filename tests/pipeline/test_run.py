@@ -2,6 +2,8 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -11,7 +13,7 @@ import osm_polygon_wikidata_website_coverage.pipeline.run as run_module
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import Occurrence, OsmIdentity
 from osm_polygon_wikidata_website_coverage.pipeline.aggregate import AggregationResult
-from osm_polygon_wikidata_website_coverage.pipeline.extract import ExtractionResult
+from osm_polygon_wikidata_website_coverage.pipeline.extract import ExtractionResult, scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
 from osm_polygon_wikidata_website_coverage.pipeline.run import (
     _file_metadata,
@@ -132,12 +134,14 @@ def test_run_analysis_writes_complete_manifest_after_all_stages(
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "complete"
     assert manifest["run_id"] == "fixture"
+    assert manifest["extraction_mode"] == "geometry"
     assert result.extraction is not None
     assert result.membership is not None
     assert set(manifest) == {
         "schema_version",
         "status",
         "run_id",
+        "extraction_mode",
         "input_roots",
         "input_pbf_inventory",
         "source_parquet_inventory",
@@ -220,6 +224,13 @@ def test_run_analysis_writes_complete_manifest_after_all_stages(
     assert manifest["generated_parquet_count"] > 0
     assert manifest["generated_parquet_count"] == len(manifest["generated_parquet_inventory"])
     assert manifest["generated_artifact_count"] == len(manifest["generated_artifact_inventory"])
+    assert all(
+        set(item) == {"path", "size_bytes", "mtime_ns", "row_count", "sha256"}
+        and len(item["sha256"]) == 64
+        and isinstance(item["row_count"], int)
+        and not item["path"].endswith(".tmp")
+        for item in manifest["generated_parquet_inventory"]
+    )
     assert all(
         set(item) == {"path", "size_bytes", "mtime_ns", "sha256"}
         and len(item["sha256"]) == 64
@@ -353,14 +364,23 @@ def test_run_helpers_preserve_hash_chunking_and_inventory_contracts(
     nested = run_root / "nested"
     nested.mkdir(parents=True)
     parquet = nested / "output.parquet"
-    parquet.write_bytes(b"parquet")
+    pq.write_table(pa.Table.from_pydict({"value": [1]}), parquet)
     temporary = nested / "ignored.tmp"
     temporary.write_bytes(b"temporary")
     generated = _generated_parquet_inventory(run_root)
     artifacts = _generated_artifact_inventory(run_root)
     assert generated[0]["path"] == "nested/output.parquet"
-    assert generated[0]["sha256"] == hashlib.sha256(b"parquet").hexdigest()
+    assert generated[0]["row_count"] == 1
+    assert generated[0]["sha256"] == hashlib.sha256(parquet.read_bytes()).hexdigest()
     assert [item["path"] for item in artifacts] == ["nested/output.parquet"]
+
+    monkeypatch.setattr(
+        run_module.pq,
+        "ParquetFile",
+        lambda path: SimpleNamespace(metadata=None),
+    )
+    with pytest.raises(RuntimeError, match="invalid generated Parquet metadata"):
+        _generated_parquet_inventory(run_root)
 
     class Stream:
         def __init__(self) -> None:
@@ -755,6 +775,11 @@ def test_run_analysis_passes_exact_stage_roots_and_returns_all_results(
     calls.clear()
     run_analysis(paths, "default-batch")
     assert calls["extract"] == (paths, "default-batch", {"batch_rows": 5_000, "workers": 1})
+
+    calls.clear()
+    run_analysis(paths, "coverage-only", scanner=scan_pbf_keys)
+    payload = cast(dict[str, object], calls["payload"])
+    assert payload["extraction_mode"] == "coverage-only"
 
     calls.clear()
     run_analysis(paths, "resumed", scanner=scanner, batch_rows=17, workers=3, resume=True)

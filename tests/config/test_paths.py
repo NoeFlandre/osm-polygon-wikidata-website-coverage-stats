@@ -6,6 +6,7 @@ import osm_polygon_wikidata_website_coverage.config.paths as paths_module
 from osm_polygon_wikidata_website_coverage.config.paths import (
     DEFAULT_DATA_ROOT,
     DataPaths,
+    _absolute,
     _overlaps,
     _validate_run_id,
 )
@@ -21,6 +22,22 @@ def test_paths_default_to_the_seagate_project_root() -> None:
         paths.wikidata_root,
         paths.website_root,
     )
+
+
+def test_absolute_path_resolution_is_physical_and_non_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    class FakePath:
+        def resolve(self, *, strict: bool) -> Path:
+            calls.append(strict)
+            return Path("/physical/path")
+
+    monkeypatch.setattr(paths_module, "Path", lambda value: FakePath())
+
+    assert _absolute("logical/path") == Path("/physical/path")
+    assert calls == [False]
 
 
 def test_paths_reject_an_output_root_outside_seagate(tmp_path: Path) -> None:
@@ -63,6 +80,47 @@ def test_paths_reject_a_source_root_that_overlaps_output_root() -> None:
         )
 
 
+def test_paths_reject_a_source_symlink_that_physically_overlaps_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects = tmp_path / "projects"
+    output = projects / "output"
+    output.mkdir(parents=True)
+    source_link = tmp_path / "source-link"
+    source_link.symlink_to(output, target_is_directory=True)
+    monkeypatch.setattr(paths_module, "DEFAULT_PROJECTS_ROOT", projects)
+
+    with pytest.raises(ValueError, match="overlaps output"):
+        DataPaths.from_values(
+            data_root=output,
+            raw_pbf_root=source_link,
+            wikidata_root=tmp_path / "wikidata",
+            website_root=tmp_path / "website",
+        )
+
+
+def test_paths_reject_an_output_symlink_that_physically_escapes_projects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_link = projects / "output-link"
+    output_link.symlink_to(outside, target_is_directory=True)
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setattr(paths_module, "DEFAULT_PROJECTS_ROOT", projects)
+
+    with pytest.raises(ValueError, match="Seagate"):
+        DataPaths.from_values(
+            data_root=output_link,
+            raw_pbf_root=source,
+            wikidata_root=source,
+            website_root=source,
+        )
+
+
 def test_overlap_detection_handles_each_nested_path_direction() -> None:
     root = Path("/Volumes/Seagate M3/projects/output")
     child = root / "source"
@@ -83,6 +141,22 @@ def test_run_root_stays_under_the_data_root(tmp_path: Path) -> None:
     )
 
     assert paths.run_root("fixture") == DEFAULT_DATA_ROOT / "runs" / "fixture"
+
+
+def test_run_root_rejects_a_symlinked_runs_directory_that_escapes_output(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data_root / "runs").symlink_to(outside, target_is_directory=True)
+    source = tmp_path / "source"
+    source.mkdir()
+    paths = DataPaths(data_root, source, source, source)
+
+    with pytest.raises(ValueError, match="escapes data root"):
+        paths.run_root("fixture")
 
 
 @pytest.mark.parametrize("run_id", ["", ".", "..", "../outside", "nested/run"])
