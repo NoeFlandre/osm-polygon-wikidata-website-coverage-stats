@@ -10,6 +10,7 @@ import osm_polygon_wikidata_website_coverage.sources._duckdb as duckdb_module
 import osm_polygon_wikidata_website_coverage.sources.website as website_module
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.sources._duckdb import read_only_connection
+from osm_polygon_wikidata_website_coverage.sources._files import _regular_file_under
 from osm_polygon_wikidata_website_coverage.sources.website import (
     WEBSITE_SUCCESS_SQL,
     SourceDatasetError,
@@ -73,13 +74,59 @@ def test_website_reader_rejects_missing_required_columns(tmp_path: Path) -> None
 
 
 def test_website_reader_rejects_missing_or_empty_polygon_directories(tmp_path: Path) -> None:
-    with pytest.raises(SourceDatasetError, match="directory is missing"):
+    with pytest.raises(SourceDatasetError) as missing:
         read_successful_website_keys(tmp_path / "missing")
+    assert (
+        str(missing.value)
+        == f"website polygons directory is missing: {tmp_path / 'missing' / 'polygons'}"
+    )
 
     root = tmp_path / "website"
     (root / "polygons").mkdir(parents=True)
-    with pytest.raises(SourceDatasetError, match="no Parquet files"):
+    with pytest.raises(SourceDatasetError) as empty:
         read_successful_website_keys(root)
+    assert (
+        str(empty.value)
+        == f"website polygons directory contains no Parquet files: {root / 'polygons'}"
+    )
+
+
+def test_website_reader_rejects_parquet_symlink_that_escapes_source_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "website"
+    polygon_root = root / "polygons"
+    polygon_root.mkdir(parents=True)
+    external = tmp_path / "external.parquet"
+    external.write_bytes(b"outside")
+    (polygon_root / "external.parquet").symlink_to(external)
+
+    with pytest.raises(SourceDatasetError) as error:
+        website_parquet_files(root)
+    assert (
+        str(error.value) == f"website file escapes source root: {polygon_root / 'external.parquet'}"
+    )
+
+
+def test_website_reader_rejects_broken_parquet_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "website"
+    polygon_root = root / "polygons"
+    polygon_root.mkdir(parents=True)
+    (polygon_root / "broken.parquet").symlink_to(tmp_path / "missing.parquet")
+
+    with pytest.raises(SourceDatasetError) as error:
+        website_parquet_files(root)
+    assert (
+        str(error.value) == f"website file escapes source root: {polygon_root / 'broken.parquet'}"
+    )
+
+
+def test_shared_regular_file_helper_fails_closed_on_resolution_errors(tmp_path: Path) -> None:
+    class UnresolvablePath:
+        def resolve(self) -> Path:
+            raise OSError("cannot resolve")
+
+    assert _regular_file_under(cast(Path, UnresolvablePath()), tmp_path) is False
 
 
 def test_website_paths_and_schema_contract_are_exact(tmp_path: Path) -> None:

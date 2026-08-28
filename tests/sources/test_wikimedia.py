@@ -31,10 +31,27 @@ def test_wikimedia_success_is_project_specific_and_requires_full_text(tmp_path: 
     _write_rows(
         root / "polygon_document_links" / "links.parquet",
         [
-            {"project": "wikipedia", "document_id": "w1", "osm_type": "way", "osm_id": 10},
-            {"project": "wikivoyage", "document_id": "v1", "osm_type": "way", "osm_id": 11},
-            {"project": "wikipedia", "document_id": "w2", "osm_type": "way", "osm_id": 12},
-            {"project": "wikipedia", "document_id": "w3", "osm_type": "way", "osm_id": 13},
+            {"project": "wikipedia", "document_id": "w1", "osm_type": "way", "osm_id": 20},
+            {
+                "project": "wikivoyage",
+                "document_id": "v1",
+                "osm_type": "relation",
+                "osm_id": 23,
+            },
+            {"project": "wikipedia", "document_id": "w2", "osm_type": "way", "osm_id": 24},
+            {
+                "project": "wikipedia",
+                "document_id": "w3",
+                "osm_type": "relation",
+                "osm_id": 27,
+            },
+            {"project": "wikipedia", "document_id": "w4", "osm_type": "way", "osm_id": 21},
+            {
+                "project": "wikipedia",
+                "document_id": "w5",
+                "osm_type": "relation",
+                "osm_id": 26,
+            },
         ],
     )
     _write_rows(
@@ -53,6 +70,18 @@ def test_wikimedia_success_is_project_specific_and_requires_full_text(tmp_path: 
                 "fetch_status": "error",
                 "full_text": "Failed",
             },
+            {
+                "project": "wikipedia",
+                "document_id": "w4",
+                "fetch_status": "ok",
+                "full_text": "Invalid way area ID",
+            },
+            {
+                "project": "wikipedia",
+                "document_id": "w5",
+                "fetch_status": "ok",
+                "full_text": "Invalid relation area ID",
+            },
         ],
     )
     _write_rows(
@@ -68,7 +97,41 @@ def test_wikimedia_success_is_project_specific_and_requires_full_text(tmp_path: 
     )
 
     assert read_successful_wikimedia_keys(root, project="wikipedia") == {OsmIdentity("way", 10)}
-    assert read_successful_wikimedia_keys(root, project="wikivoyage") == {OsmIdentity("way", 11)}
+    assert read_successful_wikimedia_keys(root, project="wikivoyage") == {
+        OsmIdentity("relation", 11)
+    }
+
+
+def test_wikimedia_reader_rejects_parquet_symlink_that_escapes_source_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "processed_v2"
+    external = tmp_path / "external.parquet"
+    external.write_bytes(b"outside")
+    link_root = root / "polygon_document_links"
+    link_root.mkdir(parents=True)
+    (link_root / "external.parquet").symlink_to(external)
+
+    with pytest.raises(SourceDatasetError) as error:
+        wikimedia_link_files(root)
+    assert (
+        str(error.value)
+        == f"Wikimedia link file escapes source root: {link_root / 'external.parquet'}"
+    )
+
+
+def test_wikimedia_reader_rejects_broken_parquet_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "processed_v2"
+    link_root = root / "polygon_document_links"
+    link_root.mkdir(parents=True)
+    (link_root / "broken.parquet").symlink_to(tmp_path / "missing.parquet")
+
+    with pytest.raises(SourceDatasetError) as error:
+        wikimedia_link_files(root)
+    assert (
+        str(error.value)
+        == f"Wikimedia link file escapes source root: {link_root / 'broken.parquet'}"
+    )
 
 
 def test_wikimedia_reader_rejects_unknown_project(tmp_path: Path) -> None:

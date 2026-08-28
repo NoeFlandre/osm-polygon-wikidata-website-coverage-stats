@@ -16,6 +16,9 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
     assert "mkdocs build --strict" in docs
     assert "mutmut results --all true" in ci
     assert "survived" in ci
+    assert "not checked" in ci
+    assert "uv build --wheel" in ci
+    assert "docker build" in ci
 
 
 def test_ci_does_not_reference_seagate_inputs() -> None:

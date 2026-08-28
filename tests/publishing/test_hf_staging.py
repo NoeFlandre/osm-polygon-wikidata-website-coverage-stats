@@ -25,10 +25,13 @@ from osm_polygon_wikidata_website_coverage.publishing.hf import (
     _check_completed_run,
     _copy_staging_files,
     _copy_summary_json,
+    _is_within,
     _manifest_entry,
     _manifest_entry_values_valid,
+    _manifest_input_roots,
     _manifest_inventory,
     _manifest_list,
+    _overlaps,
     _parquet_files,
     _prepare_destination,
     _repository_file,
@@ -181,6 +184,11 @@ def _write_run(tmp_path: Path, *, include_forbidden: bool = False) -> Path:
             {
                 "status": "complete",
                 "run_id": "fixture",
+                "input_roots": {
+                    "raw_pbf_root": str(tmp_path / "raw"),
+                    "wikidata_root": str(tmp_path / "wikidata"),
+                    "website_root": str(tmp_path / "website"),
+                },
                 "generated_parquet_count": len(generated_parquets),
                 "generated_parquet_inventory": generated_parquets,
                 "generated_artifact_count": len(generated_artifacts),
@@ -289,6 +297,25 @@ def test_hf_staging_rejects_nonempty_destination(tmp_path: Path) -> None:
 
     with pytest.raises(PublicationBoundaryError, match="empty"):
         stage_hf(_write_run(tmp_path), destination)
+
+
+def test_hf_staging_rejects_destination_overlapping_run_or_input_roots(tmp_path: Path) -> None:
+    run = _write_run(tmp_path)
+
+    for destination in (
+        run / "nested-stage",
+        tmp_path / "raw",
+        tmp_path / "wikidata" / "nested-stage",
+    ):
+        with pytest.raises(PublicationBoundaryError) as error:
+            stage_hf(run, destination)
+        assert str(error.value) == "HF staging destination overlaps a protected root"
+
+    symlink_destination = tmp_path / "stage-link"
+    symlink_destination.symlink_to(tmp_path / "website", target_is_directory=True)
+    with pytest.raises(PublicationBoundaryError) as error:
+        stage_hf(run, symlink_destination)
+    assert str(error.value) == "HF staging destination overlaps a protected root"
 
 
 @pytest.mark.parametrize(
@@ -904,6 +931,47 @@ def test_hf_completed_manifest_rejects_a_json_array(tmp_path: Path) -> None:
         _check_completed_run(manifest.parents[1])
 
 
+@pytest.mark.parametrize(
+    "input_roots",
+    [
+        None,
+        {"raw_pbf_root": "", "wikidata_root": "wikidata", "website_root": "website"},
+    ],
+)
+def test_hf_staging_rejects_invalid_manifest_input_roots(
+    tmp_path: Path,
+    input_roots: object,
+) -> None:
+    run = tmp_path / "run"
+    manifest = run / "manifests" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"status": "complete", "input_roots": input_roots}), encoding="utf-8"
+    )
+
+    with pytest.raises(PublicationBoundaryError) as error:
+        stage_hf(run, tmp_path / "stage")
+    assert str(error.value) == "completed manifest has invalid input_roots"
+
+
+def test_hf_destination_helpers_cover_equality_containment_and_disjoint_paths(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    child = root / "child"
+    sibling = tmp_path / "sibling"
+
+    assert _is_within(root, root) is True
+    assert _is_within(child, root) is True
+    assert _is_within(sibling, root) is False
+    assert _overlaps(root, child) is True
+    assert _overlaps(sibling, root) is False
+
+    with pytest.raises(PublicationBoundaryError) as error:
+        _manifest_input_roots({})
+    assert str(error.value) == "completed manifest has invalid input_roots"
+
+
 def test_hf_staged_artifact_helpers_fail_closed_on_missing_or_invalid_files(
     tmp_path: Path,
 ) -> None:
@@ -1136,6 +1204,11 @@ def test_stage_hf_forwards_exact_manifest_and_repository_file_names(
         return {
             "status": "complete",
             "run_id": "fixture",
+            "input_roots": {
+                "raw_pbf_root": str(tmp_path / "raw"),
+                "wikidata_root": str(tmp_path / "wikidata"),
+                "website_root": str(tmp_path / "website"),
+            },
             "generated_artifact_count": 0,
             "generated_artifact_inventory": [],
             "generated_parquet_count": 0,

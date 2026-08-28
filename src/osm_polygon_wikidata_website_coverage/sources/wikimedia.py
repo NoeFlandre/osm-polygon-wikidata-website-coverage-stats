@@ -8,6 +8,7 @@ import duckdb
 
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.sources._duckdb import read_only_connection
+from osm_polygon_wikidata_website_coverage.sources._files import SourceDatasetError, parquet_files
 
 WIKIMEDIA_LINK_REQUIRED_COLUMNS = frozenset({"project", "document_id", "osm_type", "osm_id"})
 WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS = frozenset(
@@ -16,11 +17,25 @@ WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS = frozenset(
 SUPPORTED_PROJECTS = frozenset({"wikipedia", "wikivoyage"})
 
 WIKIMEDIA_SUCCESS_SQL = """
-WITH linked AS (
-    SELECT project, document_id, osm_type, CAST(osm_id AS BIGINT) AS osm_id
+WITH linked_area AS (
+    SELECT project, document_id, osm_type, CAST(osm_id AS BIGINT) AS area_id
     FROM read_parquet(?, union_by_name = true)
     WHERE project = ?
       AND osm_type IN ('way', 'relation')
+      AND (
+        (osm_type = 'way' AND CAST(osm_id AS BIGINT) % 2 = 0)
+        OR (osm_type = 'relation' AND CAST(osm_id AS BIGINT) % 2 = 1)
+      )
+), linked AS (
+    SELECT
+        project,
+        document_id,
+        osm_type,
+        CASE
+            WHEN osm_type = 'way' THEN area_id // 2
+            WHEN osm_type = 'relation' THEN (area_id - 1) // 2
+        END AS osm_id
+    FROM linked_area
 ), successful_documents AS (
     SELECT project, document_id
     FROM read_parquet(?, union_by_name = true)
@@ -36,18 +51,8 @@ JOIN successful_documents
 """
 
 
-class SourceDatasetError(ValueError):
-    """Raised when a source tree is missing or violates its schema contract."""
-
-
 def _files(root: Path, relative: str, description: str) -> tuple[Path, ...]:
-    directory = root / relative
-    if not directory.is_dir():
-        raise SourceDatasetError(f"{description} directory is missing: {directory}")
-    files = tuple(sorted(directory.glob("*.parquet")))
-    if not files:
-        raise SourceDatasetError(f"{description} directory contains no Parquet files: {directory}")
-    return files
+    return parquet_files(root / relative, description, description)
 
 
 def wikimedia_link_files(root: Path) -> tuple[Path, ...]:

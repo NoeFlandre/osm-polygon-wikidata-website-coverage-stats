@@ -45,6 +45,7 @@ class SourceSnapshot:
     path: Path
     size_bytes: int
     mtime_ns: int
+    sha256: str = ""
 
     @classmethod
     def read(cls, path: Path) -> SourceSnapshot:
@@ -52,7 +53,11 @@ class SourceSnapshot:
             stat = path.stat()
         except OSError as exc:
             raise ExtractionError(f"cannot stat source PBF: {path}") from exc
-        return cls(path, stat.st_size, stat.st_mtime_ns)
+        try:
+            sha256 = _sha256(path)
+        except OSError as exc:
+            raise ExtractionError(f"cannot read source PBF: {path}") from exc
+        return cls(path, stat.st_size, stat.st_mtime_ns, sha256)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +98,20 @@ def scanner_mode(scanner: Scanner | None) -> str:
 def regular_pbf_files(raw_root: Path) -> tuple[Path, ...]:
     """Return only regular PBF files from a raw input directory."""
 
-    return tuple(sorted(path for path in raw_root.glob("*.osm.pbf") if path.is_file()))
+    physical_root = raw_root.resolve()
+    return tuple(
+        sorted(
+            path for path in raw_root.glob("*.osm.pbf") if _regular_file_under(path, physical_root)
+        )
+    )
+
+
+def _regular_file_under(path: Path, root: Path) -> bool:
+    try:
+        physical_path = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return physical_path.is_file() and (physical_path == root or root in physical_path.parents)
 
 
 def _pbf_files(raw_root: Path) -> tuple[Path, ...]:
@@ -114,7 +132,11 @@ def _unreadable_pbf_files(files: tuple[Path, ...]) -> tuple[Path, ...]:
 
 
 def _assert_unchanged(before: SourceSnapshot, after: SourceSnapshot) -> None:
-    if before.size_bytes != after.size_bytes or before.mtime_ns != after.mtime_ns:
+    if (
+        before.size_bytes != after.size_bytes
+        or before.mtime_ns != after.mtime_ns
+        or before.sha256 != after.sha256
+    ):
         raise InputChangedError(f"source PBF changed during scan: {before.path}")
 
 
@@ -416,6 +438,7 @@ def _write_checkpoint(
         "source_pbf": pbf_path.name,
         "size_bytes": snapshot.size_bytes,
         "mtime_ns": snapshot.mtime_ns,
+        "sha256": snapshot.sha256 or _sha256(pbf_path),
         "occurrence_count": extraction.occurrence_count,
         "failure_count": extraction.failure_count,
         "scanner_mode": scanner_mode,
@@ -508,13 +531,23 @@ def _checkpoint_identity_matches(
     current: SourceSnapshot,
     scanner_mode: str,
 ) -> bool:
+    if not _checkpoint_source_metadata_matches(payload, pbf_path, current):
+        return False
+    return payload.get("scanner_mode") == scanner_mode
+
+
+def _checkpoint_source_metadata_matches(
+    payload: dict[object, object], pbf_path: Path, current: SourceSnapshot
+) -> bool:
     if payload.get("source_pbf") != pbf_path.name:
         return False
     if payload.get("size_bytes") != current.size_bytes:
         return False
     if payload.get("mtime_ns") != current.mtime_ns:
         return False
-    return payload.get("scanner_mode") == scanner_mode
+    if not _valid_sha256(payload.get("sha256")):
+        return False
+    return payload.get("sha256") == current.sha256
 
 
 def _extract_one(

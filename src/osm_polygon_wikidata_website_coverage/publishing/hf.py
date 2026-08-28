@@ -82,6 +82,39 @@ def _check_completed_run(run_root: Path) -> dict[str, object]:
     return payload
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _overlaps(first: Path, second: Path) -> bool:
+    return _is_within(first, second) or _is_within(second, first)
+
+
+def _manifest_input_roots(manifest: dict[str, object]) -> tuple[Path, ...]:
+    value = manifest.get("input_roots")
+    if not isinstance(value, dict):
+        raise PublicationBoundaryError("completed manifest has invalid input_roots")
+    roots: list[Path] = []
+    for name in ("raw_pbf_root", "wikidata_root", "website_root"):
+        root = value.get(name)
+        if not isinstance(root, str) or not root:
+            raise PublicationBoundaryError("completed manifest has invalid input_roots")
+        roots.append(Path(root).resolve())
+    return tuple(roots)
+
+
+def _validate_destination(
+    destination: Path,
+    run_root: Path,
+    manifest: dict[str, object],
+) -> Path:
+    physical_destination = destination.resolve()
+    protected_roots = (run_root.resolve(), *_manifest_input_roots(manifest))
+    if any(_overlaps(physical_destination, root) for root in protected_roots):
+        raise PublicationBoundaryError("HF staging destination overlaps a protected root")
+    return physical_destination
+
+
 def _parquet_files(directory: Path, description: str) -> tuple[Path, ...]:
     if not directory.is_dir():
         raise PublicationBoundaryError(f"{description} directory is missing: {directory}")
@@ -562,9 +595,9 @@ def _copy_summary_json(
 def stage_hf(run_root: Path, destination: Path) -> Path:
     """Stage only compact coverage and summary artifacts for Hugging Face."""
 
-    run_root = run_root.absolute()
-    destination = destination.absolute()
+    run_root = run_root.resolve()
     manifest = _check_completed_run(run_root)
+    destination = _validate_destination(destination, run_root, manifest)
     global_files, summary_files = _staging_files(run_root)
     _validate_staging_files(global_files, summary_files)
     artifact_inventory, _ = _validate_staging_integrity(

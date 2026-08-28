@@ -8,6 +8,7 @@ import duckdb
 
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.sources._duckdb import read_only_connection
+from osm_polygon_wikidata_website_coverage.sources._files import SourceDatasetError, parquet_files
 
 WEBSITE_REQUIRED_COLUMNS = frozenset(
     {
@@ -37,22 +38,10 @@ WHERE osm_type IN ('way', 'relation')
 """
 
 
-class SourceDatasetError(ValueError):
-    """Raised when a source tree is missing or violates its schema contract."""
-
-
 def website_parquet_files(root: Path) -> tuple[Path, ...]:
     """Return sorted website polygon Parquets without touching their contents."""
 
-    polygon_root = root / "polygons"
-    if not polygon_root.is_dir():
-        raise SourceDatasetError(f"website polygons directory is missing: {polygon_root}")
-    files = tuple(sorted(polygon_root.glob("*.parquet")))
-    if not files:
-        raise SourceDatasetError(
-            f"website polygons directory contains no Parquet files: {polygon_root}"
-        )
-    return files
+    return parquet_files(root / "polygons", "website polygons", "website")
 
 
 def _column_names(connection: duckdb.DuckDBPyConnection, path: Path) -> set[str]:

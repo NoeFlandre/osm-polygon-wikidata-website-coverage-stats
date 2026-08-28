@@ -26,13 +26,15 @@ jobs:
       - run: uv run pytest --cov=src/osm_polygon_wikidata_website_coverage --cov-branch --cov-fail-under=100
       - run: uv run python scripts/check_crap.py
       - run: uv run mkdocs build --strict
+      - run: uv build --wheel --out-dir /tmp/wheel
+      - run: docker build --tag osm-polygon-wikidata-website-coverage-stats:ci .
       - run: uv run mutmut run --max-children 2
       - name: Require every mutation to be killed
         run: |
           set -euo pipefail
           results="$(uv run mutmut results --all true)"
           printf '%s\n' "$results"
-          if printf '%s\n' "$results" | grep -Eq ': (survived|timeout|no tests|suspicious|unviable)$'; then
+          if printf '%s\n' "$results" | grep -Eq ': (survived|timeout|no tests|not checked|suspicious|unviable)$'; then
             echo "mutmut reported a non-killed mutant" >&2
             exit 1
           fi

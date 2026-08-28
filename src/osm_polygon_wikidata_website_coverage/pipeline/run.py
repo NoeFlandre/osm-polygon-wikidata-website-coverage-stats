@@ -275,7 +275,7 @@ def _manifest_payload(
             "path": item.before.path.name,
             "size_bytes": item.before.size_bytes,
             "mtime_ns": item.before.mtime_ns,
-            "sha256": _sha256(item.before.path),
+            "sha256": item.before.sha256 or _sha256(item.before.path),
         }
         for item in extraction.source_inventory
     ]

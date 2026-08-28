@@ -13,13 +13,19 @@ import osm_polygon_wikidata_website_coverage.pipeline.run as run_module
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import Occurrence, OsmIdentity
 from osm_polygon_wikidata_website_coverage.pipeline.aggregate import AggregationResult
-from osm_polygon_wikidata_website_coverage.pipeline.extract import ExtractionResult, scan_pbf_keys
+from osm_polygon_wikidata_website_coverage.pipeline.extract import (
+    ExtractionResult,
+    SourceInventory,
+    SourceSnapshot,
+    scan_pbf_keys,
+)
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
 from osm_polygon_wikidata_website_coverage.pipeline.run import (
     _file_metadata,
     _generated_artifact_inventory,
     _generated_parquet_inventory,
     _generated_schema,
+    _manifest_payload,
     _require_generated_names,
     _require_generated_paths,
     _require_generated_prefix,
@@ -43,6 +49,51 @@ def test_data_paths_expose_a_deterministic_run_root_for_pipeline(tmp_path: Path)
     assert paths.run_root("20260827-coverage-v1") == (
         tmp_path / "data" / "runs" / "20260827-coverage-v1"
     )
+
+
+def test_manifest_payload_fills_a_missing_source_digest(tmp_path: Path) -> None:
+    source = tmp_path / "fixture-latest.osm.pbf"
+    source.write_bytes(b"fixture")
+    roots = tuple(tmp_path / name for name in ("raw", "wikidata", "website"))
+    for root in roots:
+        root.mkdir()
+    paths = DataPaths(tmp_path / "data", *roots)
+    snapshot = SourceSnapshot(source, source.stat().st_size, source.stat().st_mtime_ns)
+    extraction = ExtractionResult(
+        tmp_path / "run",
+        0,
+        0,
+        (SourceInventory(snapshot, snapshot),),
+    )
+    summary = {
+        "website_count": 0,
+        "wikipedia_count": 0,
+        "wikivoyage_count": 0,
+        "covered_by_any_text_count": 0,
+    }
+    aggregation = AggregationResult(
+        tmp_path / "run", (), tmp_path / "by-pbf.parquet", (), 0, summary
+    )
+
+    payload = _manifest_payload(
+        paths=paths,
+        run_id="fixture",
+        extraction=extraction,
+        membership=MembershipResult((), ()),
+        aggregation=aggregation,
+        generated=[],
+        artifacts=[],
+        extraction_mode="geometry",
+    )
+
+    assert payload["input_pbf_inventory"] == [
+        {
+            "path": source.name,
+            "size_bytes": source.stat().st_size,
+            "mtime_ns": source.stat().st_mtime_ns,
+            "sha256": hashlib.sha256(b"fixture").hexdigest(),
+        }
+    ]
 
 
 def test_run_analysis_writes_complete_manifest_after_all_stages(
@@ -74,7 +125,7 @@ def test_run_analysis_writes_complete_manifest_after_all_stages(
     (wikidata / "wikipedia" / "documents").mkdir(parents=True)
     pq.write_table(
         pa.Table.from_pylist(
-            [{"project": "wikipedia", "document_id": "w1", "osm_type": "way", "osm_id": 1}]
+            [{"project": "wikipedia", "document_id": "w1", "osm_type": "way", "osm_id": 2}]
         ),
         wikidata / "polygon_document_links" / "links.parquet",
     )

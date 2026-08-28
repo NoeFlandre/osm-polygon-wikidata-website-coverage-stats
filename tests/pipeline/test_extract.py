@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -46,6 +47,7 @@ from osm_polygon_wikidata_website_coverage.pipeline.extract import (
     _prepare_run_root,
     _read_checkpoint,
     _read_checkpoint_fields,
+    _regular_file_under,
     _remove_incomplete_outputs,
     _schema_matches,
     _source_output_paths,
@@ -239,6 +241,51 @@ def test_regular_pbf_files_excludes_directories_from_the_preflight_inventory(
     (tmp_path / "nested-latest.osm.pbf").mkdir()
 
     assert regular_pbf_files(tmp_path) == (tmp_path / "fixture-latest.osm.pbf",)
+
+
+def test_regular_pbf_files_excludes_symlinks_that_escape_the_raw_root(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    external = tmp_path / "external-latest.osm.pbf"
+    external.write_bytes(b"outside")
+    (raw / "external-latest.osm.pbf").symlink_to(external)
+    (raw / "broken-latest.osm.pbf").symlink_to(tmp_path / "missing-latest.osm.pbf")
+
+    assert regular_pbf_files(raw) == ()
+    with pytest.raises(ExtractionError, match="no regular PBF"):
+        _pbf_files(raw)
+
+
+def test_regular_pbf_files_returns_no_files_for_a_missing_root(tmp_path: Path) -> None:
+    assert regular_pbf_files(tmp_path / "missing") == ()
+
+
+def test_extract_regular_file_helper_uses_non_strict_resolution_and_checks_containment(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "raw"
+    root.mkdir()
+    target = root / "fixture.osm.pbf"
+    target.write_bytes(b"fixture")
+
+    class ResolvingPath:
+        def __init__(self, resolved: Path) -> None:
+            self.resolved = resolved
+            self.strict_values: list[bool | None] = []
+
+        def resolve(self, *, strict: bool | None = None) -> Path:
+            self.strict_values.append(strict)
+            return self.resolved
+
+    candidate = ResolvingPath(target)
+    assert _regular_file_under(cast(Path, candidate), root) is True
+    assert candidate.strict_values == [None]
+
+    class UnresolvablePath:
+        def resolve(self) -> Path:
+            raise OSError("cannot resolve")
+
+    assert _regular_file_under(cast(Path, UnresolvablePath()), root) is False
 
 
 def test_scanner_mode_distinguishes_geometry_and_coverage_only() -> None:
@@ -479,6 +526,29 @@ def test_extract_all_resumes_completed_sources_without_rescanning(tmp_path: Path
     assert calls == [pbf.name]
 
 
+def test_extract_all_rescans_when_source_bytes_change_without_metadata_change(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    pbf = raw / "fixture-latest.osm.pbf"
+    pbf.write_bytes(b"before")
+    calls: list[str] = []
+
+    def scanner(path: Path, callback) -> None:
+        calls.append(path.name)
+        callback(_occurrence(path.name, 1))
+
+    extract_all(_paths(tmp_path, raw), "same-metadata", scanner=scanner, batch_rows=1, resume=True)
+    stat = pbf.stat()
+    pbf.write_bytes(b"change")
+    os.utime(pbf, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    extract_all(_paths(tmp_path, raw), "same-metadata", scanner=scanner, batch_rows=1, resume=True)
+
+    assert calls == [pbf.name, pbf.name]
+
+
 def test_extract_all_rescans_when_a_checkpoint_shard_changes(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()
@@ -594,6 +664,7 @@ def test_extract_resume_helpers_use_exact_source_and_checkpoint_paths(
         "occurrence_count": 0,
         "occurrence_shards": [],
         "scanner_mode": "geometry",
+        "sha256": snapshot.sha256,
         "size_bytes": snapshot.size_bytes,
         "source_pbf": "fixture-latest.osm.pbf",
     }
@@ -682,6 +753,7 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
                 "size_bytes": snapshot.size_bytes,
                 "mtime_ns": snapshot.mtime_ns,
                 "scanner_mode": "geometry",
+                "sha256": snapshot.sha256,
             },
             source,
             snapshot,
@@ -698,6 +770,7 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
                 "size_bytes": snapshot.size_bytes,
                 "mtime_ns": snapshot.mtime_ns,
                 "scanner_mode": "geometry",
+                "sha256": snapshot.sha256,
             },
             source,
             snapshot,
@@ -715,6 +788,7 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
                 "size_bytes": snapshot.size_bytes,
                 "mtime_ns": snapshot.mtime_ns,
                 "scanner_mode": "coverage-only",
+                "sha256": snapshot.sha256,
             },
             source,
             snapshot,
@@ -730,6 +804,7 @@ def test_extract_checkpoint_reading_is_typed_and_accepts_zero_counts(
         "size_bytes": snapshot.size_bytes,
         "mtime_ns": snapshot.mtime_ns,
         "scanner_mode": "geometry",
+        "sha256": snapshot.sha256,
     }
     assert not _checkpoint_matches(
         {**valid_identity, "source_pbf": "other.osm.pbf"}, source, snapshot, 0, 0
@@ -786,6 +861,7 @@ def test_checkpoint_identity_requires_every_source_and_mode_field(tmp_path: Path
         "size_bytes": snapshot.size_bytes,
         "mtime_ns": snapshot.mtime_ns,
         "scanner_mode": "geometry",
+        "sha256": snapshot.sha256,
     }
 
     assert _checkpoint_identity_matches(identity, source, snapshot, "geometry") is True
@@ -803,7 +879,42 @@ def test_checkpoint_identity_requires_every_source_and_mode_field(tmp_path: Path
         _checkpoint_identity_matches({**identity, "mtime_ns": 0}, source, snapshot, "geometry")
         is False
     )
+    assert (
+        _checkpoint_identity_matches({**identity, "sha256": "0" * 64}, source, snapshot, "geometry")
+        is False
+    )
+    assert (
+        _checkpoint_identity_matches(
+            {key: value for key, value in identity.items() if key != "sha256"},
+            source,
+            snapshot,
+            "geometry",
+        )
+        is False
+    )
     assert _checkpoint_identity_matches(identity, source, snapshot, "coverage-only") is False
+
+
+def test_checkpoint_writes_a_digest_when_snapshot_was_constructed_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "fixture-latest.osm.pbf"
+    source.write_bytes(b"fixture")
+    snapshot = SourceSnapshot(source, source.stat().st_size, source.stat().st_mtime_ns)
+    extraction = extract_module._SourceExtraction(0, 0, SourceInventory(snapshot, snapshot))
+    calls: list[Path] = []
+
+    def fake_sha256(path: Path) -> str:
+        calls.append(path)
+        return "f" * 64
+
+    monkeypatch.setattr(extract_module, "_sha256", fake_sha256)
+    checkpoint_root = tmp_path / "run" / "checkpoints"
+    _write_checkpoint(checkpoint_root, source, extraction)
+
+    payload = json.loads((checkpoint_root / "fixture-latest.json").read_text(encoding="utf-8"))
+    assert payload["sha256"] == "f" * 64
+    assert calls == [source]
 
 
 def test_extract_all_resumes_coverage_only_scanner_with_matching_mode(
@@ -1451,6 +1562,11 @@ def test_extract_helpers_report_exact_source_and_change_contracts(tmp_path: Path
         _assert_unchanged(unchanged, SourceSnapshot(Path("fixture"), 2, 2))
     with pytest.raises(InputChangedError, match="^source PBF changed during scan: fixture$"):
         _assert_unchanged(unchanged, SourceSnapshot(Path("fixture"), 1, 3))
+    with pytest.raises(InputChangedError, match="^source PBF changed during scan: fixture$"):
+        _assert_unchanged(
+            SourceSnapshot(Path("fixture"), 1, 2, "a" * 64),
+            SourceSnapshot(Path("fixture"), 1, 2, "b" * 64),
+        )
 
 
 def test_emit_to_writers_returns_one_only_for_occurrences() -> None:
@@ -1509,3 +1625,17 @@ def test_extract_all_rejects_unreadable_sources_and_existing_runs(
 def test_source_snapshot_reports_stat_errors(tmp_path: Path) -> None:
     with pytest.raises(ExtractionError, match="cannot stat"):
         SourceSnapshot.read(tmp_path / "missing.osm.pbf")
+
+
+def test_source_snapshot_reports_read_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "fixture.osm.pbf"
+    source.write_bytes(b"fixture")
+
+    def fail_read(path: Path) -> str:
+        raise OSError(path)
+
+    monkeypatch.setattr(extract_module, "_sha256", fail_read)
+    with pytest.raises(ExtractionError, match="cannot read source PBF"):
+        SourceSnapshot.read(source)
