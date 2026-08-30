@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = next(
@@ -19,6 +20,15 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
     assert "not checked" in ci
     assert "uv build --wheel" in ci
     assert "docker build" in ci
+
+
+def test_mutation_testing_runs_behavior_tests_only() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert config["tool"]["mutmut"]["pytest_add_cli_args_test_selection"] == [
+        "tests",
+        "--ignore=tests/architecture",
+    ]
 
 
 def test_ci_does_not_reference_seagate_inputs() -> None:

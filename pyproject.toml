@@ -79,5 +79,6 @@ source_paths = ["src/osm_polygon_wikidata_website_coverage"]
 also_copy = ["CITATION.cff", "LICENSE"]
 pytest_add_cli_args_test_selection = [
     "tests",
+    "--ignore=tests/architecture",
 ]
 runner = "uv run pytest -q"
