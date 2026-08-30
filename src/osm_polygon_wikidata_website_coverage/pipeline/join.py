@@ -17,6 +17,7 @@ from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
 from osm_polygon_wikidata_website_coverage.io.duckdb import configure_connection, export_query
 from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
+from osm_polygon_wikidata_website_coverage.sources._files import file_inventory
 from osm_polygon_wikidata_website_coverage.sources.website import (
     WEBSITE_SUCCESS_SQL,
     validate_website_source,
@@ -40,25 +41,13 @@ class MembershipResult:
 _write_query = export_query
 
 
-def _file_inventory(root: Path, files: tuple[Path, ...], label: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "label": label,
-            "path": str(path.relative_to(root)),
-            "size_bytes": path.stat().st_size,
-            "mtime_ns": path.stat().st_mtime_ns,
-        }
-        for path in files
-    ]
-
-
 def _source_inventory(paths: DataPaths) -> list[dict[str, Any]]:
     website_files = validate_website_source(paths.website_root)
     link_files, document_files = validate_wikidata_source(paths.wikidata_root)
     return [
-        *_file_inventory(paths.website_root, website_files, "website"),
-        *_file_inventory(paths.wikidata_root, link_files, "wikimedia-links"),
-        *_file_inventory(paths.wikidata_root, document_files, "wikimedia-documents"),
+        *file_inventory(paths.website_root, website_files, label="website"),
+        *file_inventory(paths.wikidata_root, link_files, label="wikimedia-links"),
+        *file_inventory(paths.wikidata_root, document_files, label="wikimedia-documents"),
     ]
 
 

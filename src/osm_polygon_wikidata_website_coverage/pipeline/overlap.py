@@ -26,6 +26,7 @@ from osm_polygon_wikidata_website_coverage.io.parquet import (
     SUMMARY_SCHEMA,
 )
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
+from osm_polygon_wikidata_website_coverage.sources._files import file_inventory
 
 OVERLAP_SHARD_COUNT = 64
 _SHARD_EXPRESSION = f"hash(osm_type || ':' || CAST(osm_id AS VARCHAR)) % {OVERLAP_SHARD_COUNT}"
@@ -109,14 +110,7 @@ def _validate_memberships(memberships: MembershipResult) -> tuple[Path, Path]:
 
 
 def _inventory(paths: tuple[Path, ...], root: Path) -> list[dict[str, Any]]:
-    return [
-        {
-            "path": str(path.relative_to(root)),
-            "size_bytes": path.stat().st_size,
-            "mtime_ns": path.stat().st_mtime_ns,
-        }
-        for path in paths
-    ]
+    return file_inventory(root, paths)
 
 
 def _coverage_root(output_root: Path) -> Path:

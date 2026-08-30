@@ -9,6 +9,7 @@ import osm_polygon_wikidata_website_coverage.sources.website as website_module
 import osm_polygon_wikidata_website_coverage.sources.wikimedia as wikimedia_module
 from osm_polygon_wikidata_website_coverage.sources._files import (
     SourceDatasetError,
+    file_inventory,
     parquet_files,
     validate_columns,
 )
@@ -85,6 +86,31 @@ def test_shared_source_validator_reports_missing_columns(tmp_path: Path) -> None
 
     with pytest.raises(SourceDatasetError, match="source file .* missing columns: required"):
         validate_columns((path,), frozenset({"required"}), "source")
+
+
+def test_shared_file_inventory_records_relative_metadata_and_optional_label(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nested" / "source.parquet"
+    path.parent.mkdir()
+    path.write_bytes(b"source")
+    stat = path.stat()
+
+    assert file_inventory(tmp_path, (path,), label="website") == [
+        {
+            "label": "website",
+            "path": "nested/source.parquet",
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    ]
+    assert file_inventory(tmp_path, (path,)) == [
+        {
+            "path": "nested/source.parquet",
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    ]
 
 
 def test_source_schema_readers_wrap_arrow_errors(

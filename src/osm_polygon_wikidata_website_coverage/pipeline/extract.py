@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
 from osm_polygon_wikidata_website_coverage.io.parquet import IDENTITY_SCHEMA, IdentityParquetWriter
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 
@@ -83,6 +84,16 @@ class ExtractionResult:
 class _SourceExtraction:
     row_count: int
     source_inventory: SourceInventory
+
+
+@dataclass(frozen=True, slots=True)
+class _ExtractionContext:
+    """Immutable settings shared by each source extraction task."""
+
+    run_root: Path
+    batch_rows: int
+    scanner: Scanner
+    checkpoint_root: Path | None
 
 
 def scanner_mode(scanner: Scanner) -> str:
@@ -286,7 +297,6 @@ def _write_checkpoint(
     scanner: Scanner,
 ) -> None:
     checkpoint = _checkpoint_path(run_root, pbf_path)
-    temporary = checkpoint.with_name(f".{checkpoint.name}.tmp")
     output = _output_path(run_root, pbf_path)
     stat = output.stat()
     metadata = pq.ParquetFile(output).metadata
@@ -307,9 +317,8 @@ def _write_checkpoint(
             "sha256": _sha256(output),
         },
     }
-    checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, checkpoint)
+    with atomic_path(checkpoint) as temporary:
+        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 def _remove_incomplete_outputs(run_root: Path, pbf_path: Path) -> None:
@@ -323,18 +332,15 @@ def _remove_incomplete_outputs(run_root: Path, pbf_path: Path) -> None:
 
 def _extract_one(
     pbf_path: Path,
-    run_root: Path,
-    batch_rows: int,
-    scanner: Scanner,
-    checkpoint_root: Path | None,
+    context: _ExtractionContext,
 ) -> _SourceExtraction:
     before = SourceSnapshot.read(pbf_path)
-    output = _output_path(run_root, pbf_path)
+    output = _output_path(context.run_root, pbf_path)
     count = 0
     with IdentityParquetWriter(
         output.parent,
         filename=output.name,
-        batch_rows=batch_rows,
+        batch_rows=context.batch_rows,
     ) as writer:
 
         def emit(identity: OsmIdentity) -> None:
@@ -342,12 +348,12 @@ def _extract_one(
             writer.write(identity)
             count += 1
 
-        scanner(pbf_path, emit)
+        context.scanner(pbf_path, emit)
     after = SourceSnapshot.stat_only(pbf_path)
     _assert_unchanged(before, after)
     extraction = _SourceExtraction(count, SourceInventory(before, after))
-    if checkpoint_root is not None:
-        _write_checkpoint(run_root, pbf_path, extraction, scanner=scanner)
+    if context.checkpoint_root is not None:
+        _write_checkpoint(context.run_root, pbf_path, extraction, scanner=context.scanner)
     return extraction
 
 
@@ -362,42 +368,22 @@ def _validate_worker_configuration(workers: int, scanner: Scanner) -> None:
 
 def _extract_in_parallel(
     pbf_files: tuple[Path, ...],
-    run_root: Path,
-    batch_rows: int,
     workers: int,
-    scanner: Scanner,
-    checkpoint_root: Path | None,
+    context: _ExtractionContext,
 ) -> tuple[_SourceExtraction, ...]:
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = tuple(
-            executor.submit(
-                _extract_one,
-                path,
-                run_root,
-                batch_rows,
-                scanner,
-                checkpoint_root,
-            )
-            for path in pbf_files
-        )
+        futures = tuple(executor.submit(_extract_one, path, context) for path in pbf_files)
         return tuple(future.result() for future in futures)
 
 
 def _extract_sources(
     pbf_files: tuple[Path, ...],
-    run_root: Path,
-    batch_rows: int,
     workers: int,
-    scanner: Scanner,
-    checkpoint_root: Path | None,
+    context: _ExtractionContext,
 ) -> tuple[_SourceExtraction, ...]:
     if workers > 1:
-        return _extract_in_parallel(
-            pbf_files, run_root, batch_rows, workers, scanner, checkpoint_root
-        )
-    return tuple(
-        _extract_one(path, run_root, batch_rows, scanner, checkpoint_root) for path in pbf_files
-    )
+        return _extract_in_parallel(pbf_files, workers, context)
+    return tuple(_extract_one(path, context) for path in pbf_files)
 
 
 def _prepare_run_root(run_root: Path, resume: bool) -> Path | None:
@@ -450,7 +436,8 @@ def extract_all(
     run_root = paths.run_root(run_id)
     checkpoint_root = _prepare_run_root(run_root, resume)
     completed, pending = _partition_sources(pbf_files, run_root, checkpoint_root, scanner)
-    extracted = _extract_sources(pending, run_root, batch_rows, workers, scanner, checkpoint_root)
+    context = _ExtractionContext(run_root, batch_rows, scanner, checkpoint_root)
+    extracted = _extract_sources(pending, workers, context)
     completed.update(zip(pending, extracted, strict=True))
     ordered = tuple(completed[path] for path in pbf_files)
     return ExtractionResult(

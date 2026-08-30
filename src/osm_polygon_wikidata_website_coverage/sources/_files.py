@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -10,6 +11,24 @@ import pyarrow.parquet as pq
 
 class SourceDatasetError(ValueError):
     """Raised when a source tree is missing or violates its schema contract."""
+
+
+def file_inventory(
+    root: Path, files: tuple[Path, ...], *, label: str | None = None
+) -> list[dict[str, Any]]:
+    """Return relative file metadata in the format used by stage manifests."""
+
+    inventory: list[dict[str, Any]] = []
+    for path in files:
+        record: dict[str, Any] = {
+            "path": str(path.relative_to(root)),
+            "size_bytes": path.stat().st_size,
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        if label is not None:
+            record = {"label": label, **record}
+        inventory.append(record)
+    return inventory
 
 
 def read_column_names(path: Path, label: str) -> set[str]:

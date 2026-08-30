@@ -12,8 +12,8 @@ overlap shards -> four-category summary and completion manifests
 `config.paths` owns the Seagate-only storage contract and prevents output/source
 overlap. `domain.identity` and `domain.coverage` contain the stable key and
 pure two-set category rules. `io.pbf` is the libosmium boundary and never
-requests node locations. `io.parquet` provides bounded Arrow batches and
-atomic promotion.
+requests node locations. `io.parquet` provides bounded Arrow batches, while
+`io.atomic` owns promotion and cleanup for ordinary generated artifacts.
 
 The website and Wikimedia source modules validate only required Parquet
 metadata, then expose read-only DuckDB query parameters. Website text is

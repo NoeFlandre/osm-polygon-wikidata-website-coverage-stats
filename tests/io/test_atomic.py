@@ -26,10 +26,9 @@ def test_atomic_path_keeps_old_output_when_producer_fails(tmp_path: Path) -> Non
     output = tmp_path / "result.txt"
     output.write_text("old", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="producer failed"):
-        with atomic_path(output) as path:
-            path.write_text("partial", encoding="utf-8")
-            raise RuntimeError("producer failed")
+    with pytest.raises(RuntimeError, match="producer failed"), atomic_path(output) as path:
+        path.write_text("partial", encoding="utf-8")
+        raise RuntimeError("producer failed")
 
     assert output.read_text(encoding="utf-8") == "old"
     assert not output.with_name(".result.txt.tmp").exists()

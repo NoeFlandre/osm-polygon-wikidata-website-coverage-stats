@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +72,7 @@ class IdentityParquetWriter:
             assert self._writer is not None
             self._writer.close()
             self._writer = None
-            os.replace(self._temporary, self._final)
+            self._temporary.replace(self._final)
         except BaseException:
             self._close_writer()
             raise
