@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-from osm_polygon_wikidata_website_coverage.sources._files import SourceDatasetError, parquet_files
+from osm_polygon_wikidata_website_coverage.sources._files import (
+    parquet_files,
+    read_column_names,
+    validate_columns,
+)
 
 PROJECTS = ("wikipedia", "wikivoyage")
 WIKIMEDIA_LINK_REQUIRED_COLUMNS = frozenset({"project", "document_id", "osm_type", "osm_id"})
@@ -54,29 +55,18 @@ def wikimedia_document_files(root: Path, project: str) -> tuple[Path, ...]:
 
 
 def _column_names(path: Path) -> set[str]:
-    try:
-        return set(pq.read_schema(path).names)
-    except (OSError, pa.ArrowException) as exc:
-        raise SourceDatasetError(f"cannot read Wikimedia file schema: {path}") from exc
-
-
-def _validate_files(files: tuple[Path, ...], required: frozenset[str], label: str) -> None:
-    for path in files:
-        missing = required - _column_names(path)
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise SourceDatasetError(f"{label} file {path} is missing columns: {names}")
+    return read_column_names(path, "Wikimedia")
 
 
 def validate_wikidata_source(root: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """Validate links and both project document trees."""
 
     link_files = wikimedia_link_files(root)
-    _validate_files(link_files, WIKIMEDIA_LINK_REQUIRED_COLUMNS, "Wikimedia link")
+    validate_columns(link_files, WIKIMEDIA_LINK_REQUIRED_COLUMNS, "Wikimedia link")
     document_files = tuple(
         path for project in PROJECTS for path in wikimedia_document_files(root, project)
     )
-    _validate_files(document_files, WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS, "Wikimedia document")
+    validate_columns(document_files, WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS, "Wikimedia document")
     return link_files, document_files
 
 

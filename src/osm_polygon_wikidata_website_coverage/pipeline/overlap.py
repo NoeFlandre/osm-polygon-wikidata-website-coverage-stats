@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +13,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.domain.coverage import OVERLAP_CATEGORIES
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
 from osm_polygon_wikidata_website_coverage.io.duckdb import (
     DUCKDB_THREADS,
     MEMORY_LIMIT,
     configure_connection,
+    export_query,
 )
 from osm_polygon_wikidata_website_coverage.io.parquet import (
     MEMBERSHIP_SCHEMA,
@@ -73,6 +74,9 @@ class OverlapResult:
     summary_path: Path
     row_count: int
     summary: dict[str, int]
+
+
+_write_query = export_query
 
 
 def _identity_files(root: Path) -> tuple[Path, ...]:
@@ -198,28 +202,11 @@ def _stage_is_reusable(
     return _all_shards_valid(outputs) and _summary_is_valid(_summary_path(output_root))
 
 
-def _write_query(
-    connection: duckdb.DuckDBPyConnection,
-    query: str,
-    parameters: list[str],
-    output: Path,
-) -> None:
-    temporary = output.with_name(f".{output.name}.tmp")
-    temporary.unlink(missing_ok=True)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    destination = str(temporary).replace("'", "''")
-    connection.execute(
-        f"COPY ({query}) TO '{destination}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-        parameters,
-    )
-    os.replace(temporary, output)
-
-
 def _write_empty(path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.unlink(missing_ok=True)
-    pq.write_table(pa.Table.from_pylist([], schema=OVERLAP_SCHEMA), temporary, compression="zstd")
-    os.replace(temporary, path)
+    with atomic_path(path) as temporary:
+        pq.write_table(
+            pa.Table.from_pylist([], schema=OVERLAP_SCHEMA), temporary, compression="zstd"
+        )
 
 
 def _scratch_root(output_root: Path) -> Path:
@@ -338,11 +325,10 @@ def _summary_rows(
 
 def _write_summary(output_root: Path, rows: list[dict[str, Any]]) -> Path:
     output = _summary_path(output_root)
-    temporary = output.with_name(f".{output.name}.tmp")
-    temporary.unlink(missing_ok=True)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows, schema=SUMMARY_SCHEMA), temporary, compression="zstd")
-    os.replace(temporary, output)
+    with atomic_path(output) as temporary:
+        pq.write_table(
+            pa.Table.from_pylist(rows, schema=SUMMARY_SCHEMA), temporary, compression="zstd"
+        )
     return output
 
 
@@ -354,25 +340,24 @@ def _write_manifest(
     summary: dict[str, int],
 ) -> Path:
     output = _manifest_path(output_root)
-    temporary = output.with_name(f".{output.name}.tmp")
-    temporary.write_text(
-        json.dumps(
-            {
-                "schema_version": "1",
-                "memory_limit": MEMORY_LIMIT,
-                "duckdb_threads": DUCKDB_THREADS,
-                "raw_inventory": raw_inventory,
-                "membership_inventory": membership_inventory,
-                "row_count": row_count,
-                "summary": summary,
-            },
-            sort_keys=True,
-            indent=2,
+    with atomic_path(output) as temporary:
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "memory_limit": MEMORY_LIMIT,
+                    "duckdb_threads": DUCKDB_THREADS,
+                    "raw_inventory": raw_inventory,
+                    "membership_inventory": membership_inventory,
+                    "row_count": row_count,
+                    "summary": summary,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, output)
     return output
 
 

@@ -7,7 +7,11 @@ from tests.support import write_rows
 import osm_polygon_wikidata_website_coverage.sources._files as files_module
 import osm_polygon_wikidata_website_coverage.sources.website as website_module
 import osm_polygon_wikidata_website_coverage.sources.wikimedia as wikimedia_module
-from osm_polygon_wikidata_website_coverage.sources._files import SourceDatasetError, parquet_files
+from osm_polygon_wikidata_website_coverage.sources._files import (
+    SourceDatasetError,
+    parquet_files,
+    validate_columns,
+)
 from osm_polygon_wikidata_website_coverage.sources.website import validate_website_source
 from osm_polygon_wikidata_website_coverage.sources.wikimedia import validate_wikidata_source
 
@@ -75,6 +79,14 @@ def test_source_file_inventory_handles_resolution_failure(
     assert files_module._regular_file_under(BrokenPath(), tmp_path) is False  # type: ignore[arg-type]
 
 
+def test_shared_source_validator_reports_missing_columns(tmp_path: Path) -> None:
+    path = tmp_path / "source.parquet"
+    write_rows(path, [{"present": 1}])
+
+    with pytest.raises(SourceDatasetError, match="source file .* missing columns: required"):
+        validate_columns((path,), frozenset({"required"}), "source")
+
+
 def test_source_schema_readers_wrap_arrow_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -85,11 +97,11 @@ def test_source_schema_readers_wrap_arrow_errors(
         del path
         raise pa.ArrowInvalid("bad schema")
 
-    monkeypatch.setattr(website_module.pq, "read_schema", fail)
+    monkeypatch.setattr(files_module.pq, "read_schema", fail)
     with pytest.raises(SourceDatasetError, match="website file schema"):
         website_module._column_names(website_file)
 
-    monkeypatch.setattr(wikimedia_module.pq, "read_schema", fail)
+    monkeypatch.setattr(files_module.pq, "read_schema", fail)
     with pytest.raises(SourceDatasetError, match="Wikimedia file schema"):
         wikimedia_module._column_names(wikimedia_file)
 

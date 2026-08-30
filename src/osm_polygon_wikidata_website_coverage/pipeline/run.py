@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.extract import (
     ExtractionResult,
@@ -58,7 +58,7 @@ def _write_manifest(
     manifest_root = extraction.run_root / "manifests"
     manifest_root.mkdir(parents=True, exist_ok=True)
     output = manifest_root / "manifest.json"
-    temporary = manifest_root / ".manifest.json.tmp"
+    temporary = output.with_name(f".{output.name}.tmp")
     if not replace_existing and (output.exists() or temporary.exists()):
         raise FileExistsError(f"refusing to overwrite completion manifest: {output}")
     website_count, wikidata_count = _membership_counts(membership)
@@ -83,8 +83,8 @@ def _write_manifest(
         "outputs": [str(path.relative_to(extraction.run_root)) for path in overlap.paths]
         + [str(overlap.summary_path.relative_to(extraction.run_root))],
     }
-    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, output)
+    with atomic_path(output) as temporary:
+        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return output
 
 

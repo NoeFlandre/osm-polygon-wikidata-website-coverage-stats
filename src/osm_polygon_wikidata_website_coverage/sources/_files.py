@@ -4,9 +4,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 
 class SourceDatasetError(ValueError):
     """Raised when a source tree is missing or violates its schema contract."""
+
+
+def read_column_names(path: Path, label: str) -> set[str]:
+    """Read a source Parquet schema and translate adapter errors."""
+
+    try:
+        return set(pq.read_schema(path).names)
+    except (OSError, pa.ArrowException) as exc:
+        raise SourceDatasetError(f"cannot read {label} file schema: {path}") from exc
+
+
+def validate_columns(files: tuple[Path, ...], required: frozenset[str], label: str) -> None:
+    """Require every source file to expose the columns used by its query."""
+
+    for path in files:
+        missing = required - read_column_names(path, label)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise SourceDatasetError(f"{label} file {path} is missing columns: {names}")
 
 
 def _regular_file_under(path: Path, root: Path) -> bool:

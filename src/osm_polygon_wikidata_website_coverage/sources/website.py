@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-from osm_polygon_wikidata_website_coverage.sources._files import SourceDatasetError, parquet_files
+from osm_polygon_wikidata_website_coverage.sources._files import (
+    parquet_files,
+    read_column_names,
+    validate_columns,
+)
 
 WEBSITE_REQUIRED_COLUMNS = frozenset(
     {
@@ -39,21 +40,14 @@ def website_parquet_files(root: Path) -> tuple[Path, ...]:
 
 
 def _column_names(path: Path) -> set[str]:
-    try:
-        return set(pq.read_schema(path).names)
-    except (OSError, pa.ArrowException) as exc:
-        raise SourceDatasetError(f"cannot read website file schema: {path}") from exc
+    return read_column_names(path, "website")
 
 
 def validate_website_source(root: Path) -> tuple[Path, ...]:
     """Validate every website file and return its sorted inventory."""
 
     files = website_parquet_files(root)
-    for path in files:
-        missing = WEBSITE_REQUIRED_COLUMNS - _column_names(path)
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise SourceDatasetError(f"website file {path} is missing columns: {names}")
+    validate_columns(files, WEBSITE_REQUIRED_COLUMNS, "website")
     return files
 
 

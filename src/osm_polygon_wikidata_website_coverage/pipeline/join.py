@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,7 +14,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
-from osm_polygon_wikidata_website_coverage.io.duckdb import configure_connection
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+from osm_polygon_wikidata_website_coverage.io.duckdb import configure_connection, export_query
 from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
 from osm_polygon_wikidata_website_coverage.sources.website import (
     WEBSITE_SUCCESS_SQL,
@@ -35,6 +35,9 @@ class MembershipResult:
 
     paths: tuple[Path, Path]
     manifest_path: Path | None = None
+
+
+_write_query = export_query
 
 
 def _file_inventory(root: Path, files: tuple[Path, ...], label: str) -> list[dict[str, Any]]:
@@ -100,39 +103,21 @@ def _stage_is_reusable(
     )
 
 
-def _write_query(
-    connection: duckdb.DuckDBPyConnection,
-    query: str,
-    parameters: list[str],
-    output: Path,
-) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.tmp")
-    temporary.unlink(missing_ok=True)
-    destination = str(temporary).replace("'", "''")
-    connection.execute(
-        f"COPY ({query}) TO '{destination}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-        parameters,
-    )
-    os.replace(temporary, output)
-
-
 def _write_manifest(path: Path, source_inventory: list[dict[str, Any]]) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(
-            {
-                "schema_version": "1",
-                "source_inventory": source_inventory,
-                "outputs": ["website.parquet", "wikidata.parquet"],
-            },
-            sort_keys=True,
-            indent=2,
+    with atomic_path(path) as temporary:
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "source_inventory": source_inventory,
+                    "outputs": ["website.parquet", "wikidata.parquet"],
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
 
 
 def _cleanup_spill(run_root: Path) -> None:
