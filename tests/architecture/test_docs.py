@@ -13,6 +13,12 @@ def test_mkdocs_site_has_public_methodology_and_operations_pages() -> None:
         assert (PROJECT_ROOT / "docs" / page).is_file()
 
 
+def test_public_site_excludes_internal_working_notes() -> None:
+    config = (PROJECT_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+
+    assert "\nexclude_docs: |\n  superpowers/\n" in config
+
+
 def test_public_docs_state_the_read_only_data_boundary() -> None:
     text = "\n".join(
         (PROJECT_ROOT / "docs" / page).read_text(encoding="utf-8")
