@@ -6,6 +6,8 @@ from pathlib import Path
 
 import duckdb
 
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+
 MEMORY_LIMIT = "3GB"
 DUCKDB_THREADS = 4
 
@@ -20,3 +22,19 @@ def configure_connection(connection: duckdb.DuckDBPyConnection, output_root: Pat
     connection.execute(f"SET temp_directory = '{destination}'")
     connection.execute(f"SET threads = {DUCKDB_THREADS}")
     connection.execute("SET preserve_insertion_order = false")
+
+
+def export_query(
+    connection: duckdb.DuckDBPyConnection,
+    query: str,
+    parameters: list[str],
+    output: Path,
+) -> None:
+    """Export a DuckDB query to a compressed Parquet file atomically."""
+
+    with atomic_path(output) as temporary:
+        destination = str(temporary).replace("'", "''")
+        connection.execute(
+            f"COPY ({query}) TO '{destination}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+            parameters,
+        )
