@@ -38,3 +38,11 @@ The quality contract is RED→GREEN→REFACTOR with pytest, branch coverage,
 Ruff, ty, CRAP below 6, mutation testing, strict MkDocs, and a Docker image
 that contains code only. The source roots and the paused prior run are not
 modified by this project.
+
+Mutation testing is focused on the semantic contract surface: pure domain
+rules, raw-PBF structural polygon filtering, and read-only source adapters.
+The pipeline's filesystem, manifest, and DuckDB orchestration is verified by
+the full branch-coverage suite and end-to-end fixtures; it is not included in
+the mutation inventory because its serialization and resource-management
+variants are often observationally equivalent. The mutation gate still fails
+on every survivor in the configured semantic surface.

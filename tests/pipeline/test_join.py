@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import NoReturn
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -55,11 +56,10 @@ def test_load_memberships_reuses_matching_stage_without_source_queries(
     manifest = json.loads((run_root / "members" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "1"
 
-    monkeypatch.setattr(
-        join_module,
-        "_write_query",
-        lambda *args, **kwargs: pytest.fail("rescanned"),
-    )
+    def fail_if_rescanned(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("rescanned")
+
+    monkeypatch.setattr(join_module, "_write_query", fail_if_rescanned)
     second = load_memberships(paths, run_root, resume=True)
 
     assert second.paths == first.paths

@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -153,9 +153,10 @@ def test_compute_overlap_uses_bounded_duckdb_configuration_and_reuses_stage(
     manifest = json.loads((output / "coverage" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["memory_limit"] == MEMORY_LIMIT == "3GB"
 
-    monkeypatch.setattr(
-        overlap_module, "_run_overlap_query", lambda *args, **kwargs: pytest.fail("recomputed")
-    )
+    def fail_if_recomputed(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("recomputed")
+
+    monkeypatch.setattr(overlap_module, "_run_overlap_query", fail_if_recomputed)
     second = compute_overlap(raw, MembershipResult((website, wikidata)), output, resume=True)
     assert second.paths == first.paths
     assert second.summary == first.summary

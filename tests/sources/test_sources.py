@@ -15,8 +15,17 @@ from osm_polygon_wikidata_website_coverage.sources._files import (
     read_column_names,
     validate_columns,
 )
-from osm_polygon_wikidata_website_coverage.sources.website import validate_website_source
-from osm_polygon_wikidata_website_coverage.sources.wikimedia import validate_wikidata_source
+from osm_polygon_wikidata_website_coverage.sources.website import (
+    WEBSITE_REQUIRED_COLUMNS,
+    validate_website_source,
+    website_success_parameters,
+)
+from osm_polygon_wikidata_website_coverage.sources.wikimedia import (
+    WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS,
+    WIKIMEDIA_LINK_REQUIRED_COLUMNS,
+    validate_wikidata_source,
+    wikidata_success_parameters,
+)
 
 
 def test_website_validation_rejects_missing_directory_and_columns(tmp_path: Path) -> None:
@@ -86,8 +95,114 @@ def test_shared_source_validator_reports_missing_columns(tmp_path: Path) -> None
     path = tmp_path / "source.parquet"
     write_rows(path, [{"present": 1}])
 
-    with pytest.raises(SourceDatasetError, match="source file .* missing columns: required"):
+    with pytest.raises(
+        SourceDatasetError, match=r"^source file .* missing columns: also_required, required$"
+    ):
+        validate_columns((path,), frozenset({"required", "also_required"}), "source")
+
+
+def test_shared_source_validator_passes_the_label_to_schema_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, str]] = []
+
+    def fake_read_column_names(path: Path, label: str) -> set[str]:
+        calls.append((path, label))
+        return set()
+
+    path = Path("/source.parquet")
+    monkeypatch.setattr(files_module, "read_column_names", fake_read_column_names)
+
+    with pytest.raises(SourceDatasetError, match="source file"):
         validate_columns((path,), frozenset({"required"}), "source")
+    assert calls == [(path, "source")]
+
+
+def test_website_adapters_pass_their_exact_contract_to_shared_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path("/source")
+    files = (root / "polygons" / "one.parquet",)
+    parquet_calls: list[tuple[Path, str, str]] = []
+
+    def fake_parquet_files(
+        directory: Path, description: str, invalid_description: str
+    ) -> tuple[Path, ...]:
+        parquet_calls.append((directory, description, invalid_description))
+        return files
+
+    validate_calls: list[tuple[tuple[Path, ...], frozenset[str], str]] = []
+
+    def fake_validate_columns(
+        actual_files: tuple[Path, ...], required: frozenset[str], label: str
+    ) -> None:
+        validate_calls.append((actual_files, required, label))
+
+    monkeypatch.setattr(website_module, "parquet_files", fake_parquet_files)
+    monkeypatch.setattr(website_module, "validate_columns", fake_validate_columns)
+
+    assert website_module.website_parquet_files(root) == files
+    assert validate_website_source(root) == files
+    assert parquet_calls == [
+        (root / "polygons", "website polygons", "website"),
+        (root / "polygons", "website polygons", "website"),
+    ]
+    assert validate_calls == [(files, WEBSITE_REQUIRED_COLUMNS, "website")]
+
+
+def test_wikimedia_adapters_pass_their_exact_contract_to_shared_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path("/source")
+    link_files = (root / "polygon_document_links" / "links.parquet",)
+    document_files = (root / "wikipedia" / "documents" / "one.parquet",)
+    parquet_calls: list[tuple[Path, str, str]] = []
+
+    def fake_parquet_files(
+        directory: Path, description: str, invalid_description: str
+    ) -> tuple[Path, ...]:
+        parquet_calls.append((directory, description, invalid_description))
+        return link_files if directory.name == "polygon_document_links" else document_files
+
+    validate_calls: list[tuple[tuple[Path, ...], frozenset[str], str]] = []
+
+    def fake_validate_columns(
+        actual_files: tuple[Path, ...], required: frozenset[str], label: str
+    ) -> None:
+        validate_calls.append((actual_files, required, label))
+
+    monkeypatch.setattr(wikimedia_module, "parquet_files", fake_parquet_files)
+    monkeypatch.setattr(wikimedia_module, "validate_columns", fake_validate_columns)
+
+    assert wikimedia_module.wikimedia_link_files(root) == link_files
+    assert wikimedia_module.wikimedia_document_files(root, "wikipedia") == document_files
+    assert wikimedia_module.wikimedia_document_files(root, "wikivoyage") == document_files
+    assert parquet_calls == [
+        (root / "polygon_document_links", "Wikimedia link", "Wikimedia link"),
+        (root / "wikipedia" / "documents", "wikipedia document", "wikipedia document"),
+        (root / "wikivoyage" / "documents", "wikivoyage document", "wikivoyage document"),
+    ]
+
+    result = validate_wikidata_source(root)
+    assert result == (link_files, document_files + document_files)
+    assert validate_calls == [
+        (link_files, WIKIMEDIA_LINK_REQUIRED_COLUMNS, "Wikimedia link"),
+        (
+            document_files + document_files,
+            WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS,
+            "Wikimedia document",
+        ),
+    ]
+
+
+def test_success_queries_use_case_sensitive_source_globs() -> None:
+    root = Path("/source")
+
+    assert website_success_parameters(root) == ["/source/polygons/*.parquet"]
+    assert wikidata_success_parameters(root) == [
+        "/source/polygon_document_links/*.parquet",
+        "/source/*/documents/*.parquet",
+    ]
 
 
 def test_source_adapters_return_sorted_files_and_validate_complete_trees(tmp_path: Path) -> None:
@@ -187,7 +302,7 @@ def test_source_schema_readers_wrap_arrow_errors(
 
 
 def test_wikimedia_file_inventory_rejects_unknown_project(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="wikipedia or wikivoyage"):
+    with pytest.raises(ValueError, match=r"^project must be wikipedia or wikivoyage$"):
         wikimedia_module.wikimedia_document_files(tmp_path, "unknown")
 
 

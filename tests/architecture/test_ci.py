@@ -25,9 +25,15 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
 def test_mutation_testing_runs_behavior_tests_only() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert config["tool"]["mutmut"]["pytest_add_cli_args_test_selection"] == [
+    mutmut = config["tool"]["mutmut"]
+    assert mutmut["pytest_add_cli_args_test_selection"] == [
         "tests",
         "--ignore=tests/architecture",
+    ]
+    assert mutmut["only_mutate"] == [
+        "src/osm_polygon_wikidata_website_coverage/domain/*",
+        "src/osm_polygon_wikidata_website_coverage/io/pbf.py",
+        "src/osm_polygon_wikidata_website_coverage/sources/*",
     ]
 
 
