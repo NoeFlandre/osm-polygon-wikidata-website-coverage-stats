@@ -37,3 +37,12 @@ def test_pytest_resolves_source_and_project_test_packages() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert config["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src", "."]
+
+
+def test_mutmut_targets_the_complete_production_source_root() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    mutation_config = config["tool"]["mutmut"]
+
+    assert mutation_config["source_paths"] == ["src/osm_polygon_wikidata_website_coverage"]
+    assert "only_mutate" not in mutation_config
+    assert mutation_config["runner"] == "python -m pytest -q"

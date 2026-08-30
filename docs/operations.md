@@ -73,7 +73,7 @@ runs/<run-id>/
 ├── members/{website,wikidata}.parquet
 ├── coverage/overlap/shard-00.parquet ... shard-63.parquet
 ├── coverage/overlap-summary.parquet
-└── manifests/manifest.json
+└── coverage/manifest.json
 ```
 
 The row-level files contain only `osm_type`, `osm_id`, `website`, `wikidata`,

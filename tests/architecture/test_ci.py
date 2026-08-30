@@ -22,7 +22,7 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
     assert "docker build" in ci
 
 
-def test_mutation_testing_runs_behavior_tests_only() -> None:
+def test_mutation_testing_covers_the_complete_production_source_tree() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     mutmut = config["tool"]["mutmut"]
@@ -30,12 +30,9 @@ def test_mutation_testing_runs_behavior_tests_only() -> None:
         "tests",
         "--ignore=tests/architecture",
     ]
-    assert mutmut["only_mutate"] == [
-        "src/osm_polygon_wikidata_website_coverage/domain/*",
-        "src/osm_polygon_wikidata_website_coverage/io/atomic.py",
-        "src/osm_polygon_wikidata_website_coverage/io/pbf.py",
-        "src/osm_polygon_wikidata_website_coverage/sources/*",
-    ]
+    assert mutmut["source_paths"] == ["src/osm_polygon_wikidata_website_coverage"]
+    assert "only_mutate" not in mutmut
+    assert mutmut["runner"] == "python -m pytest -q"
 
 
 def test_mutation_result_gate_is_safe_with_pipefail() -> None:

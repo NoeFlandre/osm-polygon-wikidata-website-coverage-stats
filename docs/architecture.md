@@ -39,11 +39,9 @@ Ruff, ty, CRAP below 6, mutation testing, strict MkDocs, and a Docker image
 that contains code only. The source roots and the paused prior run are not
 modified by this project.
 
-Mutation testing covers the semantic contract surface: pure domain rules,
-atomic artifact promotion and JSON serialization, raw-PBF structural polygon
-filtering, and read-only source adapters. The pipeline's higher-level
-filesystem, manifest, and DuckDB orchestration is verified by the full
-branch-coverage suite and end-to-end fixtures; it is not included in the
-mutation inventory because many of its serialization and resource-management
-variants are observationally equivalent. The mutation gate still fails on
-every survivor in the configured surface.
+Mutation testing covers the complete production source tree. The focused
+behavior tests cover pure domain rules, atomic artifact promotion and JSON
+serialization, raw-PBF structural polygon filtering, read-only source
+adapters, and the pipeline's filesystem, manifest, and DuckDB orchestration.
+The mutation gate fails on every surviving, timed-out, untested, suspicious,
+or unviable mutant.
