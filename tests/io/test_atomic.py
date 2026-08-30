@@ -4,7 +4,11 @@ import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path, write_json
+from osm_polygon_wikidata_website_coverage.io.atomic import (
+    atomic_path,
+    read_json_object,
+    write_json,
+)
 from osm_polygon_wikidata_website_coverage.io.duckdb import export_query
 
 
@@ -58,6 +62,43 @@ def test_write_json_formats_and_promotes_output(
     assert output.read_text(encoding="utf-8") == '{\n  "a": [\n    true\n  ],\n  "z": 1\n}\n'
     assert encodings == ["utf-8"]
     assert not output.with_name(".manifest.json.tmp").exists()
+
+
+def test_read_json_object_returns_a_dictionary_for_valid_json(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text('{"status": "complete", "count": 2}', encoding="utf-8")
+
+    assert read_json_object(path) == {"status": "complete", "count": 2}
+
+
+def test_read_json_object_uses_utf8_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text('{"text": "café"}', encoding="utf-8")
+    encodings: list[str | None] = []
+    original_read_text = Path.read_text
+
+    def record_encoding(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        encodings.append(encoding)
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", record_encoding)
+
+    assert read_json_object(path) == {"text": "café"}
+    assert encodings == ["utf-8"]
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", "null"])
+def test_read_json_object_returns_none_for_unusable_json(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(content, encoding="utf-8")
+
+    assert read_json_object(path) is None
+
+
+def test_read_json_object_returns_none_for_a_missing_file(tmp_path: Path) -> None:
+    assert read_json_object(tmp_path / "missing.json") is None
 
 
 def test_export_query_writes_a_parquet_result(tmp_path: Path) -> None:

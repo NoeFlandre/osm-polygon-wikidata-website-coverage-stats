@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from contextlib import suppress
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
-from osm_polygon_wikidata_website_coverage.io.atomic import write_json
+from osm_polygon_wikidata_website_coverage.io.atomic import read_json_object, write_json
 from osm_polygon_wikidata_website_coverage.io.duckdb import configure_connection, export_query
 from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
 from osm_polygon_wikidata_website_coverage.sources._files import file_inventory
@@ -61,11 +60,7 @@ def _manifest_path(run_root: Path) -> Path:
 
 
 def _read_manifest(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
+    return read_json_object(path)
 
 
 def _output_is_valid(path: Path) -> bool:

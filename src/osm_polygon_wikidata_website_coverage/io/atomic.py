@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 
 @contextmanager
@@ -21,6 +22,16 @@ def atomic_path(path: Path) -> Iterator[Path]:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def read_json_object(path: Path) -> dict[str, Any] | None:
+    """Read a JSON object, returning ``None`` for unusable files."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def write_json(path: Path, payload: object) -> None:

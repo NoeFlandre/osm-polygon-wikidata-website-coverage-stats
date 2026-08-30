@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +12,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.domain.coverage import OVERLAP_CATEGORIES
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path, write_json
+from osm_polygon_wikidata_website_coverage.io.atomic import (
+    atomic_path,
+    read_json_object,
+    write_json,
+)
 from osm_polygon_wikidata_website_coverage.io.duckdb import (
     DUCKDB_THREADS,
     MEMORY_LIMIT,
@@ -146,11 +149,7 @@ def _summary_is_valid(path: Path) -> bool:
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
+    return read_json_object(path)
 
 
 def _expected_shard_names() -> tuple[str, ...]:
