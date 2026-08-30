@@ -31,6 +31,15 @@ def test_mutation_testing_runs_behavior_tests_only() -> None:
     ]
 
 
+def test_mutation_result_gate_is_safe_with_pipefail() -> None:
+    ci = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert (
+        "grep -Eq ': (survived|timeout|no tests|not checked|suspicious|unviable)$' <<< \"$results\""
+        in ci
+    )
+
+
 def test_ci_does_not_reference_seagate_inputs() -> None:
     text = "\n".join(
         path.read_text(encoding="utf-8")

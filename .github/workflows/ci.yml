@@ -34,11 +34,11 @@ jobs:
           set -euo pipefail
           results="$(uv run mutmut results --all true)"
           printf '%s\n' "$results"
-          if printf '%s\n' "$results" | grep -Eq ': (survived|timeout|no tests|not checked|suspicious|unviable)$'; then
+          if grep -Eq ': (survived|timeout|no tests|not checked|suspicious|unviable)$' <<< "$results"; then
             echo "mutmut reported a non-killed mutant" >&2
             exit 1
           fi
-          if ! printf '%s\n' "$results" | grep -Eq ': killed$'; then
+          if ! grep -Eq ': killed$' <<< "$results"; then
             echo "mutmut reported no killed mutants" >&2
             exit 1
           fi
