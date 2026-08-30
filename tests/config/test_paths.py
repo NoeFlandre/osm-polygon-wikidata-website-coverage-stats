@@ -12,15 +12,22 @@ from osm_polygon_wikidata_website_coverage.config.paths import (
 )
 
 
-def test_paths_default_to_the_seagate_project_root() -> None:
-    paths = DataPaths.from_values()
-
-    assert paths.data_root == DEFAULT_DATA_ROOT
-    assert paths.raw_pbf_root.name == "raw"
-    assert paths.source_paths == (
-        paths.raw_pbf_root,
-        paths.wikidata_root,
-        paths.website_root,
+def test_default_paths_use_the_seagate_project_roots() -> None:
+    assert (
+        Path("/Volumes/Seagate M3/projects/osm-polygon-wikidata-website-coverage-stats")
+        == DEFAULT_DATA_ROOT
+    )
+    assert (
+        Path("/Volumes/Seagate M3/projects/osm-polygon-wikidata-only/raw")
+        == paths_module.DEFAULT_RAW_PBF_ROOT
+    )
+    assert (
+        Path("/Volumes/Seagate M3/projects/osm-polygon-wikidata-only/processed_v2")
+        == paths_module.DEFAULT_WIKIDATA_ROOT
+    )
+    assert (
+        Path("/Volumes/Seagate M3/projects/osm-polygon-website-tag-data/runs/geofabrik-website-v1")
+        == paths_module.DEFAULT_WEBSITE_ROOT
     )
 
 
@@ -72,11 +79,17 @@ def test_paths_reject_a_missing_source_directory(tmp_path: Path) -> None:
         )
 
 
-def test_paths_reject_a_source_root_that_overlaps_output_root() -> None:
+def test_paths_reject_a_source_root_that_overlaps_output_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    monkeypatch.setattr(paths_module, "DEFAULT_PROJECTS_ROOT", tmp_path)
+
     with pytest.raises(ValueError, match="overlaps output"):
         DataPaths.from_values(
-            data_root=Path("/Volumes/Seagate M3/projects"),
-            raw_pbf_root=Path("/Volumes/Seagate M3/projects"),
+            data_root=projects,
+            raw_pbf_root=projects,
         )
 
 
