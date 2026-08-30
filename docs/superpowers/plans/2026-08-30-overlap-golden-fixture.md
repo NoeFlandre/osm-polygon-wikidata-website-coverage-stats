@@ -28,8 +28,12 @@ must perform this contract:
 def test_golden_overlap_contract_and_resume(tmp_path, monkeypatch):
     fixture = _load_fixture()
     raw = _write_parquet(tmp_path / "raw" / "universe.parquet", IDENTITY_SCHEMA, fixture["raw"])
-    website = _write_parquet(tmp_path / "members" / "website.parquet", MEMBERSHIP_SCHEMA, fixture["website"])
-    wikidata = _write_parquet(tmp_path / "members" / "wikidata.parquet", MEMBERSHIP_SCHEMA, fixture["wikidata"])
+    website = _write_parquet(
+        tmp_path / "members" / "website.parquet", MEMBERSHIP_SCHEMA, fixture["website"]
+    )
+    wikidata = _write_parquet(
+        tmp_path / "members" / "wikidata.parquet", MEMBERSHIP_SCHEMA, fixture["wikidata"]
+    )
 
     first = compute_overlap(raw.parent, MembershipResult((website, wikidata)), tmp_path / "run")
     assert _read_rows(first.paths) == _sorted_rows(fixture["rows"])
