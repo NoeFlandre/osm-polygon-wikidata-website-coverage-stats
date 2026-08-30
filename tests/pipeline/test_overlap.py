@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -177,7 +178,11 @@ def test_compute_overlap_rebuilds_invalid_resume_outputs_and_validates_inputs(
 
     assert result.row_count == 1
     with pytest.raises(ValueError, match="two membership"):
-        compute_overlap(raw, MembershipResult((website,)), tmp_path / "bad")  # type: ignore[arg-type]
+        compute_overlap(
+            raw,
+            MembershipResult(cast(tuple[Path, Path], (website,))),
+            tmp_path / "bad",
+        )
     with pytest.raises(OverlapError, match="raw identity"):
         compute_overlap(
             tmp_path / "missing", MembershipResult((website, wikidata)), tmp_path / "bad2"
@@ -235,7 +240,9 @@ def test_overlap_stage_rejects_incomplete_shard_inventory_and_cleans_failed_scra
 
     monkeypatch.setattr(overlap_module, "_write_raw_partitions", fail)
     with pytest.raises(RuntimeError, match="partition failed"):
-        overlap_module._write_partitioned_overlap(object(), raw, tmp_path / "failed")
+        overlap_module._write_partitioned_overlap(
+            cast(overlap_module.duckdb.DuckDBPyConnection, object()), raw, tmp_path / "failed"
+        )
     assert not (tmp_path / "failed" / "scratch" / "overlap-parts.tmp").exists()
     assert not (tmp_path / "failed" / "coverage" / ".overlap.tmp").exists()
 

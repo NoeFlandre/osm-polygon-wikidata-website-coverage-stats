@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -77,7 +78,7 @@ def test_source_file_inventory_handles_resolution_failure(
         def resolve(self) -> Path:
             raise OSError("resolve failed")
 
-    assert files_module._regular_file_under(BrokenPath(), tmp_path) is False  # type: ignore[arg-type]
+    assert files_module._regular_file_under(cast(Path, BrokenPath()), tmp_path) is False
 
 
 def test_shared_source_validator_reports_missing_columns(tmp_path: Path) -> None:

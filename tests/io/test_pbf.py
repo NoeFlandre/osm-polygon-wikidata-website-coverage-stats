@@ -16,7 +16,7 @@ class Node:
 class Way:
     def __init__(self, refs: list[int], closed: bool | None) -> None:
         self.id = 11
-        self.nodes = [Node(ref) for ref in refs]
+        self.nodes: Any = [Node(ref) for ref in refs]
         if closed is not None:
             self._closed = closed
 

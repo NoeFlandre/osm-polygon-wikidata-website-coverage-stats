@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -11,7 +12,9 @@ import osm_polygon_wikidata_website_coverage.pipeline.run as run_module
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
+from osm_polygon_wikidata_website_coverage.pipeline.extract import ExtractionResult
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
+from osm_polygon_wikidata_website_coverage.pipeline.overlap import OverlapResult
 from osm_polygon_wikidata_website_coverage.pipeline.run import run_analysis
 
 
@@ -114,9 +117,9 @@ def test_run_manifest_helpers_reject_missing_metadata_and_existing_output(
         run_module._write_manifest(
             paths,
             "fixture",
-            extraction,
+            cast(ExtractionResult, extraction),
             membership,
-            overlap,
+            cast(OverlapResult, overlap),
             scanner=run_module.scan_pbf_keys,
             replace_existing=False,
         )

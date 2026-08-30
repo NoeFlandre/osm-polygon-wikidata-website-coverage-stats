@@ -63,7 +63,7 @@ indent-style = "space"
 
 [tool.ty.environment]
 python-version = "3.12"
-root = ["src"]
+root = ["src", "."]
 
 [tool.coverage.run]
 branch = true

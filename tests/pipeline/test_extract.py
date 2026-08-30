@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -217,7 +218,7 @@ def test_extract_validation_helpers_cover_unreadable_and_unstable_inputs(
         def resolve(self) -> Path:
             raise OSError("resolve failed")
 
-    assert extract_module._regular_file_under(BrokenPath(), tmp_path) is False  # type: ignore[arg-type]
+    assert extract_module._regular_file_under(cast(Path, BrokenPath()), tmp_path) is False
 
     monkeypatch.setattr(extract_module.os, "access", lambda path, mode: False)
     with pytest.raises(ExtractionError, match="unreadable"):

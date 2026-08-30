@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 
 from osm_polygon_wikidata_website_coverage.domain.coverage import (
@@ -23,7 +25,7 @@ def test_overlap_category_exhaustively_maps_two_sets(
 
 
 def test_coverage_flags_normalize_values_and_expose_category() -> None:
-    flags = CoverageFlags(website=1, wikidata=object())
+    flags = CoverageFlags(website=cast(bool, 1), wikidata=cast(bool, object()))
 
     assert flags == CoverageFlags(website=True, wikidata=True)
     assert flags.overlap_category == "both"
