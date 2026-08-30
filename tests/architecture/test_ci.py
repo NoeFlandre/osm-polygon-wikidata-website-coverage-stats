@@ -26,7 +26,7 @@ def test_workflows_use_node24_action_majors() -> None:
     actions = (
         "actions/checkout@v7",
         "actions/setup-python@v7",
-        "astral-sh/setup-uv@v10",
+        "astral-sh/setup-uv@v10.0.1",
     )
 
     for name in ("ci.yml", "docs.yml"):
