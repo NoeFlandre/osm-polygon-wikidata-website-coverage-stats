@@ -158,7 +158,7 @@ Remove only the generated `site/`, `mutants/`, `.coverage`, and `.pytest_cache/`
 
 Observed: those generated paths, plus the temporary offline wheel directory under `/tmp`, were removed. The unrelated `.DS_Store` files were left untouched.
 
-- [ ] **Step 3: Commit and push the verified change**
+- [x] **Step 3: Commit and push the verified change**
 
 ```bash
 git add src/osm_polygon_wikidata_website_coverage/io/atomic.py src/osm_polygon_wikidata_website_coverage/pipeline/join.py src/osm_polygon_wikidata_website_coverage/pipeline/overlap.py tests/io/test_atomic.py docs/superpowers/plans/2026-08-30-json-reader-refactor.md
@@ -166,6 +166,10 @@ git commit -m "refactor: centralize JSON object reads"
 git push origin main
 ```
 
-- [ ] **Step 4: Verify the published commit**
+Observed: the refactor was committed as `c6be450` and pushed to `main`; the CI formatting feedback was resolved in the follow-up formatting commit `ce6aa28`, which was also pushed to `main`.
+
+- [x] **Step 4: Verify the published commit**
 
 Confirm the checkout has no project changes beyond pre-existing `.DS_Store` files, `origin/main` points to the new commit, the public repository remains on `main` only, and exact-SHA CI and Documentation workflows succeed.
+
+Observed for `ce6aa28`: local `main` and `origin/main` matched; the only remote branch was `main`; the repository was public with `main` as its default branch; GitHub Pages was public at `https://noeflandre.github.io/osm-polygon-wikidata-website-coverage-stats/`; and both exact-SHA CI and Documentation workflows succeeded.
