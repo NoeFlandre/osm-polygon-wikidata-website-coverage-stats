@@ -1,3 +1,4 @@
+import re
 import tomllib
 from pathlib import Path
 
@@ -31,6 +32,15 @@ def test_project_uses_apache_license_and_quality_tools() -> None:
     assert "ty" in metadata
     assert "mutmut" in metadata
     assert "Apache License" in license_text
+
+
+def test_pre_commit_ruff_revision_matches_locked_ruff() -> None:
+    pre_commit = (PROJECT_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    lock = (PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8")
+    match = re.search(r'(?ms)^name = "ruff"\nversion = "([^"]+)"', lock)
+
+    assert match is not None
+    assert f"rev: v{match.group(1)}" in pre_commit
 
 
 def test_pytest_resolves_source_and_project_test_packages() -> None:
