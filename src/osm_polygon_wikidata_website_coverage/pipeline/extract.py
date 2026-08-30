@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+from osm_polygon_wikidata_website_coverage.io.atomic import write_json
 from osm_polygon_wikidata_website_coverage.io.parquet import IDENTITY_SCHEMA, IdentityParquetWriter
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 
@@ -317,8 +317,7 @@ def _write_checkpoint(
             "sha256": _sha256(output),
         },
     }
-    with atomic_path(checkpoint) as temporary:
-        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    write_json(checkpoint, payload)
 
 
 def _remove_incomplete_outputs(run_root: Path, pbf_path: Path) -> None:

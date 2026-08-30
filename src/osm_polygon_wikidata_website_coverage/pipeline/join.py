@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+from osm_polygon_wikidata_website_coverage.io.atomic import write_json
 from osm_polygon_wikidata_website_coverage.io.duckdb import configure_connection, export_query
 from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
 from osm_polygon_wikidata_website_coverage.sources._files import file_inventory
@@ -93,20 +93,14 @@ def _stage_is_reusable(
 
 
 def _write_manifest(path: Path, source_inventory: list[dict[str, Any]]) -> None:
-    with atomic_path(path) as temporary:
-        temporary.write_text(
-            json.dumps(
-                {
-                    "schema_version": "1",
-                    "source_inventory": source_inventory,
-                    "outputs": ["website.parquet", "wikidata.parquet"],
-                },
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+    write_json(
+        path,
+        {
+            "schema_version": "1",
+            "source_inventory": source_inventory,
+            "outputs": ["website.parquet", "wikidata.parquet"],
+        },
+    )
 
 
 def _cleanup_spill(run_root: Path) -> None:

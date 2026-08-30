@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,3 +21,10 @@ def atomic_path(path: Path) -> Iterator[Path]:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def write_json(path: Path, payload: object) -> None:
+    """Serialize JSON with the pipeline's stable formatting and promote it atomically."""
+
+    with atomic_path(path) as temporary:
+        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")

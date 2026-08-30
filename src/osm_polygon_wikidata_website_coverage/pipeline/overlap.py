@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.domain.coverage import OVERLAP_CATEGORIES
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path, write_json
 from osm_polygon_wikidata_website_coverage.io.duckdb import (
     DUCKDB_THREADS,
     MEMORY_LIMIT,
@@ -334,24 +334,18 @@ def _write_manifest(
     summary: dict[str, int],
 ) -> Path:
     output = _manifest_path(output_root)
-    with atomic_path(output) as temporary:
-        temporary.write_text(
-            json.dumps(
-                {
-                    "schema_version": "1",
-                    "memory_limit": MEMORY_LIMIT,
-                    "duckdb_threads": DUCKDB_THREADS,
-                    "raw_inventory": raw_inventory,
-                    "membership_inventory": membership_inventory,
-                    "row_count": row_count,
-                    "summary": summary,
-                },
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+    write_json(
+        output,
+        {
+            "schema_version": "1",
+            "memory_limit": MEMORY_LIMIT,
+            "duckdb_threads": DUCKDB_THREADS,
+            "raw_inventory": raw_inventory,
+            "membership_inventory": membership_inventory,
+            "row_count": row_count,
+            "summary": summary,
+        },
+    )
     return output
 
 

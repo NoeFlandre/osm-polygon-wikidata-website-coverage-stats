@@ -32,6 +32,7 @@ def test_mutation_testing_runs_behavior_tests_only() -> None:
     ]
     assert mutmut["only_mutate"] == [
         "src/osm_polygon_wikidata_website_coverage/domain/*",
+        "src/osm_polygon_wikidata_website_coverage/io/atomic.py",
         "src/osm_polygon_wikidata_website_coverage/io/pbf.py",
         "src/osm_polygon_wikidata_website_coverage/sources/*",
     ]

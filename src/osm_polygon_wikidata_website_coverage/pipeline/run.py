@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +10,7 @@ import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+from osm_polygon_wikidata_website_coverage.io.atomic import write_json
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.extract import (
     ExtractionResult,
@@ -83,8 +82,7 @@ def _write_manifest(
         "outputs": [str(path.relative_to(extraction.run_root)) for path in overlap.paths]
         + [str(overlap.summary_path.relative_to(extraction.run_root))],
     }
-    with atomic_path(output) as temporary:
-        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    write_json(output, payload)
     return output
 
 

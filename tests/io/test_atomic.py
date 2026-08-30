@@ -4,7 +4,7 @@ import duckdb
 import pyarrow.parquet as pq
 import pytest
 
-from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path
+from osm_polygon_wikidata_website_coverage.io.atomic import atomic_path, write_json
 from osm_polygon_wikidata_website_coverage.io.duckdb import export_query
 
 
@@ -32,6 +32,32 @@ def test_atomic_path_keeps_old_output_when_producer_fails(tmp_path: Path) -> Non
 
     assert output.read_text(encoding="utf-8") == "old"
     assert not output.with_name(".result.txt.tmp").exists()
+
+
+def test_write_json_formats_and_promotes_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "nested" / "manifest.json"
+    encodings: list[str | None] = []
+    original_write_text = Path.write_text
+
+    def record_encoding(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        encodings.append(encoding)
+        return original_write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", record_encoding)
+
+    write_json(output, {"z": 1, "a": [True]})
+
+    assert output.read_text(encoding="utf-8") == '{\n  "a": [\n    true\n  ],\n  "z": 1\n}\n'
+    assert encodings == ["utf-8"]
+    assert not output.with_name(".manifest.json.tmp").exists()
 
 
 def test_export_query_writes_a_parquet_result(tmp_path: Path) -> None:
