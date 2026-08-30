@@ -220,6 +220,16 @@ def test_overlap_validators_reject_missing_corrupt_and_wrong_schema_inputs(
     assert overlap_module._summary_is_valid(valid_summary) is True
 
 
+def test_parquet_schema_validator_accepts_each_expected_schema(tmp_path: Path) -> None:
+    overlap = tmp_path / "overlap.parquet"
+    summary = tmp_path / "summary.parquet"
+    pq.write_table(pa.Table.from_pylist([], schema=OVERLAP_SCHEMA), overlap)
+    pq.write_table(pa.Table.from_pylist([], schema=SUMMARY_SCHEMA), summary)
+
+    assert overlap_module._parquet_matches_schema(overlap, OVERLAP_SCHEMA) is True
+    assert overlap_module._parquet_matches_schema(summary, SUMMARY_SCHEMA) is True
+
+
 def test_overlap_stage_rejects_incomplete_shard_inventory_and_cleans_failed_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

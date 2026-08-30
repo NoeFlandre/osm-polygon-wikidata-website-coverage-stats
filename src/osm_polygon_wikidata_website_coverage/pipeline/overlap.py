@@ -129,20 +129,20 @@ def _manifest_path(output_root: Path) -> Path:
     return _coverage_root(output_root) / "manifest.json"
 
 
-def _output_is_valid(path: Path) -> bool:
+def _parquet_matches_schema(path: Path, schema: pa.Schema) -> bool:
     try:
         metadata = pq.ParquetFile(path).metadata
-        return metadata is not None and pq.read_schema(path) == OVERLAP_SCHEMA
+        return metadata is not None and pq.read_schema(path) == schema
     except (OSError, ValueError, pa.ArrowException):
         return False
+
+
+def _output_is_valid(path: Path) -> bool:
+    return _parquet_matches_schema(path, OVERLAP_SCHEMA)
 
 
 def _summary_is_valid(path: Path) -> bool:
-    try:
-        metadata = pq.ParquetFile(path).metadata
-        return metadata is not None and pq.read_schema(path) == SUMMARY_SCHEMA
-    except (OSError, ValueError, pa.ArrowException):
-        return False
+    return _parquet_matches_schema(path, SUMMARY_SCHEMA)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
