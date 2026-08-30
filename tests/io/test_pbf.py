@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -68,6 +68,23 @@ def test_closed_way_fast_path_stops_after_three_distinct_nodes() -> None:
     assert nodes.seen == 3
 
 
+@pytest.mark.parametrize(
+    ("refs", "expected"),
+    [
+        ((1, 2, 3, 1), True),
+        ((1, 2, 3, 4, 1), True),
+        ((1, 2, 3), False),
+        ((1, 2, 1), False),
+        ((1, 2, 3, 2), False),
+        ((1, 2, 2, 1), False),
+    ],
+)
+def test_closed_way_sequence_requires_a_simple_closed_ring(
+    refs: tuple[int, ...], expected: bool
+) -> None:
+    assert pbf_module._closed_way_sequence([Node(ref) for ref in refs]) is expected
+
+
 def test_closed_way_fallback_without_is_closed_preserves_exact_predicate() -> None:
     class NoClosedFlag:
         id = 1
@@ -91,6 +108,25 @@ def test_structural_helpers_reject_malformed_or_open_rings() -> None:
     assert pbf_module._has_closed_ring(IterableOnly()) is True
 
 
+def test_structural_way_defaults_missing_nodes_to_an_empty_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    class MissingNodes:
+        def is_closed(self) -> bool:
+            return True
+
+    def has_closed_ring(nodes: object) -> bool:
+        seen.append(nodes)
+        return True
+
+    monkeypatch.setattr(pbf_module, "_has_closed_ring", has_closed_ring)
+
+    assert pbf_module._is_structurally_closed(MissingNodes()) is True
+    assert seen == [()]
+
+
 def test_relation_type_reads_object_and_tuple_tags() -> None:
     class Tag:
         k = "type"
@@ -99,6 +135,59 @@ def test_relation_type_reads_object_and_tuple_tags() -> None:
     assert pbf_module._relation_type([Tag()]) == "boundary"
     assert pbf_module._relation_type([("type", "multipolygon")]) == "multipolygon"
     assert pbf_module._relation_type([("name", "ignored")]) is None
+
+
+def test_handler_ignores_invalid_way_and_relation_ids() -> None:
+    results: list[OsmIdentity] = []
+    handler = pbf_module._CoverageHandler(callback=results.append)
+
+    valid_way = Way([1, 2, 3, 1], True)
+    valid_way.id = cast(Any, "bad")
+    handler.way(valid_way)
+    invalid_relation = Relation([("type", "boundary")])
+    invalid_relation.id = cast(Any, object())
+    handler.relation(invalid_relation)
+
+    assert results == []
+
+
+def test_handler_ignores_missing_way_id_and_relation_tags() -> None:
+    results: list[OsmIdentity] = []
+    handler = pbf_module._CoverageHandler(callback=results.append)
+
+    class MissingWayId:
+        nodes = [Node(1), Node(2), Node(3), Node(1)]
+
+        def is_closed(self) -> bool:
+            return True
+
+    class MissingRelationTags:
+        id = 1
+
+    class MissingRelationId:
+        tags = [("type", "boundary")]
+
+    handler.way(MissingWayId())
+    handler.relation(MissingRelationTags())
+    handler.relation(MissingRelationId())
+
+    assert results == []
+
+
+def test_build_handler_uses_the_default_and_custom_factories() -> None:
+    def callback(identity: OsmIdentity) -> None:
+        del identity
+
+    default = pbf_module._build_coverage_handler(callback, None)
+    assert isinstance(default, pbf_module._CoverageHandler)
+
+    class CustomHandler:
+        def __init__(self, *, callback: object) -> None:
+            self.callback = callback
+
+    custom = pbf_module._build_coverage_handler(callback, CustomHandler)
+    assert isinstance(custom, CustomHandler)
+    assert custom.callback is callback
 
 
 def test_scan_pbf_keys_uses_locations_false_and_validates_paths(
@@ -110,9 +199,10 @@ def test_scan_pbf_keys_uses_locations_false_and_validates_paths(
 
     class Handler:
         def __init__(self, *, callback: object) -> None:
-            del callback
+            self.callback = callback
 
         def apply_file(self, filename: str, *, locations: bool) -> None:
+            assert self.callback is not None
             calls.append((filename, locations))
 
     scan_pbf_keys(pbf, lambda _: None, handler_factory=Handler)

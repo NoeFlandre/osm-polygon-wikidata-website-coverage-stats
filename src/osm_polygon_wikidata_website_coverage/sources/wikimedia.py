@@ -6,7 +6,6 @@ from pathlib import Path
 
 from osm_polygon_wikidata_website_coverage.sources._files import (
     parquet_files,
-    read_column_names,
     validate_columns,
 )
 
@@ -52,10 +51,6 @@ def wikimedia_document_files(root: Path, project: str) -> tuple[Path, ...]:
     if project not in PROJECTS:
         raise ValueError("project must be wikipedia or wikivoyage")
     return parquet_files(root / project / "documents", f"{project} document", f"{project} document")
-
-
-def _column_names(path: Path) -> set[str]:
-    return read_column_names(path, "Wikimedia")
 
 
 def validate_wikidata_source(root: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:

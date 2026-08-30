@@ -3,7 +3,7 @@ from typing import cast
 
 import pyarrow as pa
 import pytest
-from tests.support import write_rows
+from tests.support import write_rows, write_wikidata_tree
 
 import osm_polygon_wikidata_website_coverage.sources._files as files_module
 import osm_polygon_wikidata_website_coverage.sources.website as website_module
@@ -12,6 +12,7 @@ from osm_polygon_wikidata_website_coverage.sources._files import (
     SourceDatasetError,
     file_inventory,
     parquet_files,
+    read_column_names,
     validate_columns,
 )
 from osm_polygon_wikidata_website_coverage.sources.website import validate_website_source
@@ -89,6 +90,58 @@ def test_shared_source_validator_reports_missing_columns(tmp_path: Path) -> None
         validate_columns((path,), frozenset({"required"}), "source")
 
 
+def test_source_adapters_return_sorted_files_and_validate_complete_trees(tmp_path: Path) -> None:
+    website = tmp_path / "website"
+    (website / "polygons").mkdir(parents=True)
+    write_rows(
+        website / "polygons" / "b.parquet",
+        [
+            {
+                "osm_type": "way",
+                "osm_id": 2,
+                "website_text_status": "success",
+                "website_text": "text",
+                "contact_website_text_status": "absent",
+                "contact_website_text": None,
+            }
+        ],
+    )
+    write_rows(
+        website / "polygons" / "a.parquet",
+        [
+            {
+                "osm_type": "relation",
+                "osm_id": 1,
+                "website_text_status": "success",
+                "website_text": "text",
+                "contact_website_text_status": "absent",
+                "contact_website_text": None,
+            }
+        ],
+    )
+    website_files = website_module.website_parquet_files(website)
+    assert website_files == tuple(sorted(website_files))
+    assert validate_website_source(website) == website_files
+
+    wikidata = tmp_path / "wikidata"
+    write_wikidata_tree(wikidata)
+    link_files = wikimedia_module.wikimedia_link_files(wikidata)
+    wikipedia_files = wikimedia_module.wikimedia_document_files(wikidata, "wikipedia")
+    wikivoyage_files = wikimedia_module.wikimedia_document_files(wikidata, "wikivoyage")
+    assert link_files == tuple(sorted(link_files))
+    assert wikipedia_files == tuple(sorted(wikipedia_files))
+    assert wikivoyage_files == tuple(sorted(wikivoyage_files))
+    assert validate_wikidata_source(wikidata) == (link_files, wikipedia_files + wikivoyage_files)
+
+
+def test_shared_source_validator_accepts_a_complete_schema(tmp_path: Path) -> None:
+    path = tmp_path / "source.parquet"
+    write_rows(path, [{"required": 1, "also_required": "yes"}])
+
+    assert read_column_names(path, "source") == {"required", "also_required"}
+    validate_columns((path,), frozenset({"required", "also_required"}), "source")
+
+
 def test_shared_file_inventory_records_relative_metadata_and_optional_label(
     tmp_path: Path,
 ) -> None:
@@ -126,11 +179,11 @@ def test_source_schema_readers_wrap_arrow_errors(
 
     monkeypatch.setattr(files_module.pq, "read_schema", fail)
     with pytest.raises(SourceDatasetError, match="website file schema"):
-        website_module._column_names(website_file)
+        read_column_names(website_file, "website")
 
     monkeypatch.setattr(files_module.pq, "read_schema", fail)
     with pytest.raises(SourceDatasetError, match="Wikimedia file schema"):
-        wikimedia_module._column_names(wikimedia_file)
+        read_column_names(wikimedia_file, "Wikimedia")
 
 
 def test_wikimedia_file_inventory_rejects_unknown_project(tmp_path: Path) -> None:

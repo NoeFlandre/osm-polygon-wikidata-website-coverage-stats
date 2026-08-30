@@ -6,7 +6,6 @@ from pathlib import Path
 
 from osm_polygon_wikidata_website_coverage.sources._files import (
     parquet_files,
-    read_column_names,
     validate_columns,
 )
 
@@ -37,10 +36,6 @@ def website_parquet_files(root: Path) -> tuple[Path, ...]:
     """Return sorted website Parquets without touching source contents beyond metadata."""
 
     return parquet_files(root / "polygons", "website polygons", "website")
-
-
-def _column_names(path: Path) -> set[str]:
-    return read_column_names(path, "website")
 
 
 def validate_website_source(root: Path) -> tuple[Path, ...]:
