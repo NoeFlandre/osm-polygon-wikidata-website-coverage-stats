@@ -76,12 +76,11 @@ and quality tooling.
 
 - Configure DuckDB with a memory limit safely below 5 GB and four threads.
 - Create/reuse local temporary membership tables once per run.
-- Read all raw identity files once, left join the two membership sets, compute
-  flags/category in one projection, and hash-partition occurrences.
-- Deduplicate each hash bucket independently, then export deterministic 64
-  overlap shards atomically. The hash invariant keeps every identity in one
-  bucket, so this is equivalent to global deduplication with a smaller working
-  set.
+- Read all raw identity files once and hash-partition raw identity occurrences.
+- Deduplicate each hash bucket independently, left join the two membership
+  sets for the unique identities, and compute flags/category in one projection.
+  The hash invariant keeps every identity in one bucket, so this is equivalent
+  to global deduplication with a smaller working set and avoids repeated joins.
 - Compute only the four-category summary from the final overlap rows.
 - Add stage manifests so matching membership/overlap outputs can be reused on
   resume and mismatched artifacts are rebuilt safely.

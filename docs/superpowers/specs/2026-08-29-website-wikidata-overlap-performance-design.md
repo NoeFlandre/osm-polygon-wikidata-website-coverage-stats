@@ -108,20 +108,20 @@ reused on resume.
 
 ### 3. Partition-first overlap join
 
-DuckDB will read all local raw identity files once and join the occurrences
-against the two local membership tables. The query will calculate the two
-boolean flags, the four-category label, and a stable hash shard in the same
-projection. It will not perform a global raw-identity `DISTINCT`.
+DuckDB will read all local raw identity files once and calculate a stable hash
+shard for each raw identity occurrence. It will not perform a global raw-
+identity `DISTINCT` or join the membership tables for duplicate occurrences.
 
-The classified occurrences will first be written into 64 hash buckets. Each
-bucket is then deduplicated and sorted independently before atomic promotion to
-its final shard. Since every occurrence of an identity has the same hash, local
-deduplication is exactly equivalent to global deduplication while bounding the
-largest working set. Membership tables are loaded once and are not rescanned
-from the source trees for each shard. DuckDB will use four threads and a
-configured memory limit below the 5 GB process budget; any external spill will
-be under `<Seagate project root>/runs/<run-id>/scratch/` and cleaned after
-successful stage completion or at the next safe resume boundary.
+The raw occurrences will first be written into 64 hash buckets. Each bucket is
+then deduplicated independently, joined to the two local membership tables,
+classified, and sorted before atomic promotion to its final shard. Since every
+occurrence of an identity has the same hash, local deduplication is exactly
+equivalent to global deduplication while bounding the largest working set.
+Membership tables are loaded once and are not rescanned from the source trees
+for each shard. DuckDB will use four threads and a configured memory limit below
+the 5 GB process budget; any external spill will be under
+`<Seagate project root>/runs/<run-id>/scratch/` and cleaned after successful
+stage completion or at the next safe resume boundary.
 
 ### 4. Single overlap summary
 

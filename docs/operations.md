@@ -45,10 +45,11 @@ The source membership stage writes exactly two local key tables:
 `members/website.parquet` and `members/wikidata.parquet`. Their source-file
 inventory is recorded in `members/manifest.json` and is checked before reuse.
 
-The overlap stage reads the raw identity files once, joins the two local key
-tables, hash-partitions classified occurrences, deduplicates within each of 64
-deterministic shards, and writes one four-row summary. The coverage manifest is
-promoted only after all outputs validate.
+The overlap stage reads the raw identity files once, hash-partitions raw
+identity occurrences, deduplicates within each of 64 deterministic shards,
+joins the two local key tables for those unique identities, and writes one
+four-row summary. The coverage manifest is promoted only after all outputs
+validate.
 
 ## Resource and storage contract
 

@@ -103,34 +103,25 @@ def test_compute_overlap_deduplicates_raw_ids_and_writes_four_categories(
     assert not (tmp_path / "run" / "scratch").exists()
 
 
-def test_write_shard_deduplicates_rows_after_partitioning(tmp_path: Path) -> None:
+def test_write_shard_deduplicates_raw_rows_before_membership_join(tmp_path: Path) -> None:
     bucket = tmp_path / "bucket"
     bucket.mkdir()
     pq.write_table(
         pa.Table.from_pylist(
             [
-                {
-                    "osm_type": "way",
-                    "osm_id": 1,
-                    "website": True,
-                    "wikidata": False,
-                    "overlap_category": "website_only",
-                },
-                {
-                    "osm_type": "way",
-                    "osm_id": 1,
-                    "website": True,
-                    "wikidata": False,
-                    "overlap_category": "website_only",
-                },
+                {"osm_type": "way", "osm_id": 1},
+                {"osm_type": "way", "osm_id": 1},
             ],
-            schema=OVERLAP_SCHEMA,
+            schema=IDENTITY_SCHEMA,
         ),
         bucket / "part-0.parquet",
     )
 
     connection = overlap_module.duckdb.connect(database=":memory:")
     try:
+        connection.execute("CREATE TEMP TABLE website_keys (osm_type VARCHAR, osm_id BIGINT)")
+        connection.execute("CREATE TEMP TABLE wikidata_keys (osm_type VARCHAR, osm_id BIGINT)")
+        connection.execute("INSERT INTO website_keys VALUES ('way', 1)")
         output = tmp_path / "shard.parquet"
         overlap_module._write_shard(connection, bucket, output)
     finally:

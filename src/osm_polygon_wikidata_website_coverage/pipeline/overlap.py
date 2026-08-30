@@ -28,14 +28,21 @@ from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
 
 OVERLAP_SHARD_COUNT = 64
 _SHARD_EXPRESSION = f"hash(osm_type || ':' || CAST(osm_id AS VARCHAR)) % {OVERLAP_SHARD_COUNT}"
-_OVERLAP_QUERY = f"""
-WITH classified AS (
+_PARTITION_QUERY = f"""
+SELECT osm_type, osm_id, {_SHARD_EXPRESSION} AS shard_id
+FROM read_parquet(?, union_by_name = true)
+"""
+_SHARD_QUERY = """
+WITH raw AS (
+    SELECT DISTINCT osm_type, osm_id
+    FROM read_parquet(?)
+), classified AS (
     SELECT
         raw.osm_type,
         raw.osm_id,
         website.osm_id IS NOT NULL AS website,
         wikidata.osm_id IS NOT NULL AS wikidata
-    FROM read_parquet(?, union_by_name = true) AS raw
+    FROM raw
     LEFT JOIN website_keys AS website USING (osm_type, osm_id)
     LEFT JOIN wikidata_keys AS wikidata USING (osm_type, osm_id)
 )
@@ -49,8 +56,7 @@ SELECT
         WHEN website THEN 'website_only'
         WHEN wikidata THEN 'wikidata_only'
         ELSE 'neither'
-    END AS overlap_category,
-    {_SHARD_EXPRESSION} AS shard_id
+    END AS overlap_category
 FROM classified
 """
 
@@ -241,10 +247,10 @@ def _temporary_overlap_root(output_root: Path) -> Path:
 def _write_raw_partitions(
     connection: duckdb.DuckDBPyConnection, raw_root: Path, partitions: Path
 ) -> None:
-    """Hash-partition classified raw occurrences before global deduplication."""
+    """Hash-partition raw identity occurrences before deduplicating or joining."""
     destination = str(partitions).replace("'", "''")
     connection.execute(
-        f"COPY ({_OVERLAP_QUERY}) TO '{destination}' "
+        f"COPY ({_PARTITION_QUERY}) TO '{destination}' "
         "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (shard_id))",
         [str(raw_root / "*.parquet")],
     )
@@ -258,8 +264,7 @@ def _write_shard(connection: duckdb.DuckDBPyConnection, bucket: Path, output: Pa
         return
     _write_query(
         connection,
-        "SELECT DISTINCT osm_type, osm_id, website, wikidata, overlap_category "
-        "FROM read_parquet(?) ORDER BY osm_type, osm_id",
+        _SHARD_QUERY,
         [str(bucket / "*.parquet")],
         output,
     )

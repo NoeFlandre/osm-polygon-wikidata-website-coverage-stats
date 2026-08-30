@@ -23,12 +23,12 @@ processed link files already use original OSM IDs.
 
 `pipeline.extract` scans PBFs independently, keeps one bounded writer per
 source, and checkpoints at PBF boundaries. `pipeline.join` materializes the two
-membership tables once. `pipeline.overlap` loads those tables once, computes
-both flags and the category in one projection, hash-partitions identity
-occurrences, and deduplicates each partition independently. This bounds the
-largest deduplication working set without changing the result: all occurrences
-of one identity have the same hash shard. No per-shard source rescan, geometry
-assembler, report renderer, or publisher is in the run path.
+membership tables once. `pipeline.overlap` hash-partitions raw identity
+occurrences, deduplicates each partition independently, and then joins the two
+membership tables once per unique identity in that partition to compute both
+flags and the category. This bounds the largest deduplication working set and
+avoids repeated joins for duplicate raw occurrences. No per-shard source
+rescan, geometry assembler, report renderer, or publisher is in the run path.
 
 DuckDB is limited to 3 GB and four threads. Its spill directory is under the
 Seagate run root and is deleted after the connection closes. Python never loads
