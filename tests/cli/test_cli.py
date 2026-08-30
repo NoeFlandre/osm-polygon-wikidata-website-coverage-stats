@@ -1,5 +1,6 @@
 import runpy
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -137,11 +138,15 @@ def test_cli_paths_forwards_each_explicit_root(tmp_path: Path) -> None:
 
 def test_cli_module_entrypoint_can_render_help(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["coverage", "--help"])
+    monkeypatch.delitem(sys.modules, "osm_polygon_wikidata_website_coverage.cli", raising=False)
 
-    with pytest.raises(SystemExit) as raised:
-        runpy.run_module(
-            "osm_polygon_wikidata_website_coverage.cli",
-            run_name="__main__",
-        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(SystemExit) as raised:
+            runpy.run_module(
+                "osm_polygon_wikidata_website_coverage.cli",
+                run_name="__main__",
+            )
 
     assert raised.value.code == 0
+    assert not any(warning.category is RuntimeWarning for warning in caught)
