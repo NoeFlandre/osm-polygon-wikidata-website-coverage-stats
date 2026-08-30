@@ -35,9 +35,7 @@ def test_read_json_object_returns_a_dictionary_for_valid_json(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("content", ["not json", "[]", "null"])
-def test_read_json_object_returns_none_for_unusable_json(
-    tmp_path: Path, content: str
-) -> None:
+def test_read_json_object_returns_none_for_unusable_json(tmp_path: Path, content: str) -> None:
     path = tmp_path / "manifest.json"
     path.write_text(content, encoding="utf-8")
 
