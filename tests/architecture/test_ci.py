@@ -22,6 +22,19 @@ def test_ci_workflows_run_locked_quality_and_docs_checks() -> None:
     assert "docker build" in ci
 
 
+def test_workflows_use_node24_action_majors() -> None:
+    actions = (
+        "actions/checkout@v7",
+        "actions/setup-python@v7",
+        "astral-sh/setup-uv@v10",
+    )
+
+    for name in ("ci.yml", "docs.yml"):
+        workflow = (PROJECT_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        for action in actions:
+            assert action in workflow
+
+
 def test_mutation_testing_covers_the_complete_production_source_tree() -> None:
     config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
