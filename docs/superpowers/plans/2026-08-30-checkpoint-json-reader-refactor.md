@@ -118,7 +118,7 @@ Remove only `site/`, `mutants/`, `.coverage`, `.pytest_cache/`, and the temporar
 
 Observed: all listed generated paths were removed; unrelated `.DS_Store` files were left untouched.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 ```bash
 git add src/osm_polygon_wikidata_website_coverage/io/atomic.py src/osm_polygon_wikidata_website_coverage/pipeline/extract.py tests/io/test_atomic.py docs/superpowers/plans/2026-08-30-checkpoint-json-reader-refactor.md
@@ -126,6 +126,10 @@ git commit -m "refactor: share checkpoint JSON parsing"
 git push origin main
 ```
 
-- [ ] **Step 4: Verify the published commit**
+Observed: the implementation and tests were committed as `c120e54` and pushed to `main`.
+
+- [x] **Step 4: Verify the published commit**
 
 Confirm exact local/remote `main` synchronization, only `main` exists remotely, and the exact-SHA CI and Documentation workflows pass.
+
+Observed for `c120e54`: exact-SHA CI run `33320242608` and Documentation run `33320242606` both succeeded; remote `main` matched the local commit and remained the only remote branch.
