@@ -322,6 +322,19 @@ def test_extract_checkpoint_helpers_reject_invalid_payloads(tmp_path: Path) -> N
     )
 
 
+def test_read_checkpoint_ignores_a_source_that_disappeared(tmp_path: Path) -> None:
+    pbf = tmp_path / "fixture.osm.pbf"
+    pbf.write_bytes(b"fixture")
+    checkpoint = tmp_path / "checkpoints" / "fixture.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text("{}", encoding="utf-8")
+    pbf.unlink()
+
+    assert (
+        extract_module._read_checkpoint(tmp_path, pbf, scanner=extract_module.scan_pbf_keys) is None
+    )
+
+
 def test_extract_checkpoint_writer_rejects_missing_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

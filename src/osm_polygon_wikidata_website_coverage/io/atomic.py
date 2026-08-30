@@ -29,7 +29,7 @@ def read_json_object(path: Path) -> dict[str, Any] | None:
 
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
 

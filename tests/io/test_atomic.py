@@ -89,6 +89,13 @@ def test_read_json_object_uses_utf8_encoding(
     assert encodings == ["utf-8"]
 
 
+def test_read_json_object_returns_none_for_invalid_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_bytes(b'{"text": "\xff"}')
+
+    assert read_json_object(path) is None
+
+
 @pytest.mark.parametrize("content", ["not json", "[]", "null"])
 def test_read_json_object_returns_none_for_unusable_json(tmp_path: Path, content: str) -> None:
     path = tmp_path / "manifest.json"

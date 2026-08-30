@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
@@ -16,7 +15,7 @@ import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
-from osm_polygon_wikidata_website_coverage.io.atomic import write_json
+from osm_polygon_wikidata_website_coverage.io.atomic import read_json_object, write_json
 from osm_polygon_wikidata_website_coverage.io.parquet import IDENTITY_SCHEMA, IdentityParquetWriter
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 
@@ -280,11 +279,11 @@ def _read_checkpoint(
 ) -> _SourceExtraction | None:
     checkpoint = _checkpoint_path(run_root, pbf_path)
     try:
-        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
+        payload = read_json_object(checkpoint)
+        if payload is None:
             return None
         current = _checkpoint_source_snapshot(payload, pbf_path)
-    except (OSError, TypeError, ValueError, ExtractionError):
+    except (TypeError, ValueError, ExtractionError):
         return None
     return _checkpoint_extraction(run_root, pbf_path, payload, current, scanner)
 
