@@ -1,0 +1,54 @@
+{
+  "raw": [
+    {"osm_type": "way", "osm_id": 1001},
+    {"osm_type": "way", "osm_id": 1002},
+    {"osm_type": "way", "osm_id": 1002},
+    {"osm_type": "relation", "osm_id": 2001},
+    {"osm_type": "relation", "osm_id": 2002}
+  ],
+  "website": [
+    {"osm_type": "way", "osm_id": 1002},
+    {"osm_type": "relation", "osm_id": 2002}
+  ],
+  "wikidata": [
+    {"osm_type": "relation", "osm_id": 2001},
+    {"osm_type": "relation", "osm_id": 2002}
+  ],
+  "rows": [
+    {
+      "osm_type": "relation",
+      "osm_id": 2001,
+      "website": false,
+      "wikidata": true,
+      "overlap_category": "wikidata_only"
+    },
+    {
+      "osm_type": "relation",
+      "osm_id": 2002,
+      "website": true,
+      "wikidata": true,
+      "overlap_category": "both"
+    },
+    {
+      "osm_type": "way",
+      "osm_id": 1001,
+      "website": false,
+      "wikidata": false,
+      "overlap_category": "neither"
+    },
+    {
+      "osm_type": "way",
+      "osm_id": 1002,
+      "website": true,
+      "wikidata": false,
+      "overlap_category": "website_only"
+    }
+  ],
+  "summary": [
+    {"overlap_category": "neither", "count": 1, "percentage": 25.0},
+    {"overlap_category": "website_only", "count": 1, "percentage": 25.0},
+    {"overlap_category": "wikidata_only", "count": 1, "percentage": 25.0},
+    {"overlap_category": "both", "count": 1, "percentage": 25.0}
+  ],
+  "counts": {"neither": 1, "website_only": 1, "wikidata_only": 1, "both": 1}
+}
