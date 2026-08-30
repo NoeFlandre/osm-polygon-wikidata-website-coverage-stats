@@ -1,4 +1,4 @@
-"""Coverage analysis for raw OSM polygons and text-backed datasets."""
+"""Fast overlap analysis for raw OSM polygons and successful text datasets."""
 
 __all__ = ["__version__"]
 

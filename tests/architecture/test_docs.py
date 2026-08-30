@@ -13,7 +13,7 @@ def test_mkdocs_site_has_public_methodology_and_operations_pages() -> None:
         assert (PROJECT_ROOT / "docs" / page).is_file()
 
 
-def test_public_docs_state_read_only_inputs_and_compact_hf_boundary() -> None:
+def test_public_docs_state_the_read_only_data_boundary() -> None:
     text = "\n".join(
         (PROJECT_ROOT / "docs" / page).read_text(encoding="utf-8")
         for page in ("index.md", "methodology.md", "operations.md", "architecture.md")
@@ -22,5 +22,6 @@ def test_public_docs_state_read_only_inputs_and_compact_hf_boundary() -> None:
     assert "read-only" in text
     assert "successful" in text
     assert "ODbL" in text
-    assert "full text" in text
+    assert "full_text" in text
     assert "raw PBF" in text
+    assert "64" in text

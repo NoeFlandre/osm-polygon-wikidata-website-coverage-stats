@@ -1,4 +1,4 @@
-"""Thin command-line composition for preflight, runs, and publication staging."""
+"""Thin command-line composition for the two-set overlap calculation."""
 
 # Typer declares options in function signatures by design.
 # ruff: noqa: B008
@@ -16,7 +16,6 @@ from osm_polygon_wikidata_website_coverage.config.paths import (
     DEFAULT_WIKIDATA_ROOT,
     DataPaths,
 )
-from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.extract import MAX_WORKERS, regular_pbf_files
 from osm_polygon_wikidata_website_coverage.pipeline.run import run_analysis
 
@@ -62,57 +61,46 @@ def preflight(
 
 @app.command("run")
 def run_command(
-    run_id: str = typer.Option("20260828-coverage-v5", help="Unique run identifier."),
+    run_id: str = typer.Option(
+        "20260829-website-wikidata-overlap-v1", help="Unique run identifier."
+    ),
     workers: int = typer.Option(
-        4,
+        1,
         min=1,
         max=MAX_WORKERS,
-        help=f"Independent PBF extraction workers (maximum {MAX_WORKERS}).",
+        help=(
+            "PBF extraction workers; one is fastest for the Seagate disk by default "
+            f"(maximum {MAX_WORKERS})."
+        ),
+    ),
+    batch_rows: int = typer.Option(
+        100_000,
+        min=1,
+        help="Bounded raw-identity rows per Parquet row group.",
     ),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="Seagate output root."),
     raw_pbf_root: Path = typer.Option(DEFAULT_RAW_PBF_ROOT, help="Read-only raw PBF root."),
     wikidata_root: Path = typer.Option(DEFAULT_WIKIDATA_ROOT, help="Read-only Wikidata root."),
     website_root: Path = typer.Option(DEFAULT_WEBSITE_ROOT, help="Read-only website root."),
-    with_geometry: bool = typer.Option(
-        False,
-        "--with-geometry/--coverage-only",
-        help="Assemble and calculate full geometry metrics; coverage-only is faster.",
-    ),
     resume: bool = typer.Option(
         True,
         "--resume/--fresh",
         help="Reuse completed per-PBF checkpoints when rerunning an interrupted run.",
     ),
 ) -> None:
-    """Extract, join, aggregate, render, and verify one complete run."""
+    """Compute raw-universe overlap between successful website and Wikidata text."""
 
     paths = _paths(data_root, raw_pbf_root, wikidata_root, website_root)
-    if with_geometry:
-        result = run_analysis(paths, run_id, resume=resume, workers=workers)
-    else:
-        result = run_analysis(
-            paths,
-            run_id,
-            batch_rows=50_000,
-            resume=resume,
-            scanner=scan_pbf_keys,
-            workers=workers,
-        )
+    result = run_analysis(
+        paths,
+        run_id,
+        batch_rows=batch_rows,
+        resume=resume,
+        workers=workers,
+    )
     typer.echo(f"completed run: {result.run_root}")
-    typer.echo(f"valid polygon universe: {result.aggregation.global_row_count}")
-
-
-@app.command("stage-hf")
-def stage_hf_command(
-    run_root: Path = typer.Argument(..., help="Completed run directory."),
-    destination: Path = typer.Option(..., help="Empty staging directory."),
-) -> None:
-    """Stage only compact coverage artifacts for the public HF dataset."""
-
-    from osm_polygon_wikidata_website_coverage.publishing.hf import stage_hf
-
-    staged = stage_hf(run_root, destination)
-    typer.echo(f"staged Hugging Face dataset files: {staged}")
+    typer.echo(f"raw polygon universe: {result.overlap.row_count}")
+    typer.echo(f"overlap summary: {result.overlap.summary_path}")
 
 
 if __name__ == "__main__":

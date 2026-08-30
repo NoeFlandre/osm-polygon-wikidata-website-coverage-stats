@@ -1,5 +1,5 @@
-site_name: OSM polygon text coverage
-site_description: Coverage statistics for raw OSM polygons against website, Wikipedia, and Wikivoyage text.
+site_name: OSM polygon website/Wikidata overlap
+site_description: Fast, resumable overlap statistics for raw OSM polygons and successful website/Wikidata text.
 site_url: https://noeflandre.github.io/osm-polygon-wikidata-website-coverage-stats/
 repo_url: https://github.com/NoeFlandre/osm-polygon-wikidata-website-coverage-stats
 repo_name: NoeFlandre/osm-polygon-wikidata-website-coverage-stats

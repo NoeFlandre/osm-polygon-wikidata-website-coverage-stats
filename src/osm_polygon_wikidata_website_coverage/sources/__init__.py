@@ -1,1 +1,1 @@
-"""Read-only source dataset adapters."""
+"""Read-only website and Wikidata membership adapters."""

@@ -1,9 +1,8 @@
-"""Stable OSM identities and occurrence provenance."""
+"""Stable OSM identities used by the overlap calculation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 PolygonOsmType = str
 
@@ -24,89 +23,3 @@ class OsmIdentity:
     @property
     def key(self) -> tuple[str, int]:
         return self.osm_type, self.osm_id
-
-
-@dataclass(frozen=True, slots=True)
-class Occurrence:
-    """One valid geometry occurrence from one raw PBF."""
-
-    identity: OsmIdentity
-    source_pbf: str
-    region: str = ""
-    osm_version: int | None = None
-    osm_timestamp: str | datetime | None = None
-    relation_kind: str | None = None
-    geometry_type: str | None = None
-    geometry: str | None = None
-    centroid_lon: float | None = None
-    centroid_lat: float | None = None
-    bbox_min_lon: float | None = None
-    bbox_min_lat: float | None = None
-    bbox_max_lon: float | None = None
-    bbox_max_lat: float | None = None
-    area_m2: float | None = None
-    area_bucket: str | None = None
-    geometry_hash: str | None = None
-
-    def __post_init__(self) -> None:
-        if not self.source_pbf:
-            raise ValueError("source PBF name cannot be empty")
-
-    @property
-    def timestamp_value(self) -> datetime:
-        """Return a timezone-aware timestamp for deterministic ordering."""
-
-        if self.osm_timestamp is None:
-            return datetime.min.replace(tzinfo=UTC)
-        if isinstance(self.osm_timestamp, datetime):
-            value = self.osm_timestamp
-        else:
-            value = datetime.fromisoformat(self.osm_timestamp.replace("Z", "+00:00"))
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-
-
-@dataclass(frozen=True, slots=True)
-class GeometryFailure:
-    """An area candidate that could not produce a valid polygon geometry."""
-
-    identity: OsmIdentity | None
-    source_pbf: str
-    candidate_kind: str
-    failure_kind: str
-    message: str
-
-
-def canonical_occurrence(occurrences: tuple[Occurrence, ...] | list[Occurrence]) -> Occurrence:
-    """Choose the highest-version, newest, then lexicographically first occurrence."""
-
-    if not occurrences:
-        raise ValueError("at least one occurrence is required")
-    highest_version = _highest_version(occurrences)
-    version_matches = _version_matches(occurrences, highest_version)
-    newest_timestamp = max(occurrence.timestamp_value for occurrence in version_matches)
-    timestamp_matches = tuple(_timestamp_matches(version_matches, newest_timestamp))
-    return min(timestamp_matches, key=lambda occurrence: occurrence.source_pbf)
-
-
-def _version_value(occurrence: Occurrence) -> int:
-    return occurrence.osm_version if occurrence.osm_version is not None else -1
-
-
-def _highest_version(occurrences: tuple[Occurrence, ...] | list[Occurrence]) -> int:
-    return max(_version_value(occurrence) for occurrence in occurrences)
-
-
-def _version_matches(
-    occurrences: tuple[Occurrence, ...] | list[Occurrence], version: int
-) -> tuple[Occurrence, ...]:
-    return tuple(occurrence for occurrence in occurrences if _version_value(occurrence) == version)
-
-
-def _timestamp_matches(
-    occurrences: tuple[Occurrence, ...], timestamp: datetime
-) -> tuple[Occurrence, ...]:
-    return tuple(
-        occurrence for occurrence in occurrences if occurrence.timestamp_value == timestamp
-    )

@@ -1,12 +1,12 @@
 cff-version: 1.2.0
-title: "OSM polygon Wikidata and website coverage"
+title: "OSM polygon website/Wikidata overlap"
 message: "If you use this software or derived coverage artifacts, please cite it."
 type: software
 authors:
   - family-names: Flandre
     given-names: Noe
     name-suffix: ""
-date-released: 2026-08-27
+date-released: 2026-08-29
 license: Apache-2.0
 repository-code: https://github.com/NoeFlandre/osm-polygon-wikidata-website-coverage-stats
 keywords:

@@ -1,49 +1,37 @@
-"""Read-only successful Wikipedia and Wikivoyage membership queries."""
+"""Read-only successful Wikipedia/Wikivoyage membership as one Wikidata set."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
-from osm_polygon_wikidata_website_coverage.sources._duckdb import read_only_connection
 from osm_polygon_wikidata_website_coverage.sources._files import SourceDatasetError, parquet_files
 
+PROJECTS = ("wikipedia", "wikivoyage")
 WIKIMEDIA_LINK_REQUIRED_COLUMNS = frozenset({"project", "document_id", "osm_type", "osm_id"})
 WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS = frozenset(
     {"project", "document_id", "fetch_status", "full_text"}
 )
-SUPPORTED_PROJECTS = frozenset({"wikipedia", "wikivoyage"})
-
-WIKIMEDIA_SUCCESS_SQL = """
-WITH linked_area AS (
-    SELECT project, document_id, osm_type, CAST(osm_id AS BIGINT) AS area_id
-    FROM read_parquet(?, union_by_name = true)
-    WHERE project = ?
-      AND osm_type IN ('way', 'relation')
-      AND (
-        (osm_type = 'way' AND CAST(osm_id AS BIGINT) % 2 = 0)
-        OR (osm_type = 'relation' AND CAST(osm_id AS BIGINT) % 2 = 1)
-      )
-), linked AS (
+WIKIDATA_SUCCESS_SQL = """
+WITH linked AS (
     SELECT
         project,
         document_id,
         osm_type,
-        CASE
-            WHEN osm_type = 'way' THEN area_id // 2
-            WHEN osm_type = 'relation' THEN (area_id - 1) // 2
-        END AS osm_id
-    FROM linked_area
+        CAST(osm_id AS BIGINT) AS osm_id
+    FROM read_parquet(?, union_by_name = true)
+    WHERE project IN ('wikipedia', 'wikivoyage')
+      AND osm_type IN ('way', 'relation')
 ), successful_documents AS (
     SELECT project, document_id
     FROM read_parquet(?, union_by_name = true)
-    WHERE project = ?
+    WHERE project IN ('wikipedia', 'wikivoyage')
       AND fetch_status = 'ok'
       AND length(trim(coalesce(full_text, ''))) > 0
 )
-SELECT linked.osm_type, linked.osm_id
+SELECT DISTINCT linked.osm_type, linked.osm_id
 FROM linked
 JOIN successful_documents
   ON successful_documents.project = linked.project
@@ -51,79 +39,51 @@ JOIN successful_documents
 """
 
 
-def _files(root: Path, relative: str, description: str) -> tuple[Path, ...]:
-    return parquet_files(root / relative, description, description)
-
-
 def wikimedia_link_files(root: Path) -> tuple[Path, ...]:
     """Return sorted polygon-document link Parquets."""
 
-    return _files(root, "polygon_document_links", "Wikimedia link")
+    return parquet_files(root / "polygon_document_links", "Wikimedia link", "Wikimedia link")
 
 
 def wikimedia_document_files(root: Path, project: str) -> tuple[Path, ...]:
-    """Return sorted document Parquets for one Wikimedia project."""
+    """Return sorted document Parquets for one supported project."""
 
-    _validate_project(project)
-    return _files(root, f"{project}/documents", f"{project} document")
-
-
-def _validate_project(project: str) -> None:
-    if project not in SUPPORTED_PROJECTS:
+    if project not in PROJECTS:
         raise ValueError("project must be wikipedia or wikivoyage")
+    return parquet_files(root / project / "documents", f"{project} document", f"{project} document")
 
 
-def _column_names(connection: duckdb.DuckDBPyConnection, path: Path) -> set[str]:
-    rows = connection.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()
-    return {str(row[0]) for row in rows}
+def _column_names(path: Path) -> set[str]:
+    try:
+        return set(pq.read_schema(path).names)
+    except (OSError, pa.ArrowException) as exc:
+        raise SourceDatasetError(f"cannot read Wikimedia file schema: {path}") from exc
 
 
-def validate_wikimedia_source(
-    root: Path,
-    project: str,
-    connection: duckdb.DuckDBPyConnection,
-) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
-    """Validate link/document files and return their sorted inventories."""
+def _validate_files(files: tuple[Path, ...], required: frozenset[str], label: str) -> None:
+    for path in files:
+        missing = required - _column_names(path)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise SourceDatasetError(f"{label} file {path} is missing columns: {names}")
 
-    _validate_project(project)
+
+def validate_wikidata_source(root: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Validate links and both project document trees."""
+
     link_files = wikimedia_link_files(root)
-    document_files = wikimedia_document_files(root, project)
-    for path in link_files:
-        missing = WIKIMEDIA_LINK_REQUIRED_COLUMNS - _column_names(connection, path)
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise SourceDatasetError(f"Wikimedia link file {path} is missing columns: {names}")
-    for path in document_files:
-        missing = WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS - _column_names(connection, path)
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise SourceDatasetError(f"Wikimedia document file {path} is missing columns: {names}")
+    _validate_files(link_files, WIKIMEDIA_LINK_REQUIRED_COLUMNS, "Wikimedia link")
+    document_files = tuple(
+        path for project in PROJECTS for path in wikimedia_document_files(root, project)
+    )
+    _validate_files(document_files, WIKIMEDIA_DOCUMENT_REQUIRED_COLUMNS, "Wikimedia document")
     return link_files, document_files
 
 
-def read_successful_wikimedia_keys(root: Path, *, project: str) -> set[OsmIdentity]:
-    """Return identities linked to successful nonempty project documents."""
+def wikidata_success_parameters(root: Path) -> list[str]:
+    """Return parameters for the combined successful-membership query."""
 
-    _validate_project(project)
-    with read_only_connection() as connection:
-        validate_wikimedia_source(root, project, connection)
-        parameters = [
-            str(root / "polygon_document_links" / "*.parquet"),
-            project,
-            str(root / project / "documents" / "*.parquet"),
-            project,
-        ]
-        rows = connection.execute(WIKIMEDIA_SUCCESS_SQL, parameters).fetchall()
-    return {OsmIdentity(str(osm_type), int(osm_id)) for osm_type, osm_id in rows}
-
-
-def wikimedia_success_parameters(root: Path, project: str) -> list[str]:
-    """Return parameters for the reusable project-specific membership query."""
-
-    _validate_project(project)
     return [
         str(root / "polygon_document_links" / "*.parquet"),
-        project,
-        str(root / project / "documents" / "*.parquet"),
-        project,
+        str(root / "*" / "documents" / "*.parquet"),
     ]

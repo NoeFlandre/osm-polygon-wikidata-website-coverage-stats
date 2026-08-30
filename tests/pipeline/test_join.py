@@ -1,118 +1,120 @@
+import json
 from pathlib import Path
 
-import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from tests.support import write_source_tree, write_wikidata_tree
 
+import osm_polygon_wikidata_website_coverage.pipeline.join as join_module
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
-from osm_polygon_wikidata_website_coverage.pipeline.join import (
-    _write_distinct_keys,
-    load_source_membership,
-)
+from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
+from osm_polygon_wikidata_website_coverage.pipeline.join import load_memberships
 
 
-def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows), path)
-
-
-def test_load_source_membership_writes_three_key_only_tables_and_diagnostics(
+def test_load_memberships_materializes_only_website_and_union_wikidata(
     tmp_path: Path,
 ) -> None:
-    raw = tmp_path / "raw"
-    raw.mkdir()
-    wikidata = tmp_path / "processed_v2"
     website = tmp_path / "website"
-    _write_rows(
-        website / "polygons" / "fixture.parquet",
-        [
-            {
-                "osm_type": "way",
-                "osm_id": 1,
-                "website_text_status": "success",
-                "website_text": "site",
-                "contact_website_text_status": "absent",
-                "contact_website_text": None,
-            },
-            {
-                "osm_type": "way",
-                "osm_id": 1,
-                "website_text_status": "success",
-                "website_text": "site again",
-                "contact_website_text_status": "absent",
-                "contact_website_text": None,
-            },
-        ],
-    )
-    _write_rows(
-        wikidata / "polygon_document_links" / "links.parquet",
-        [{"project": "wikipedia", "document_id": "w1", "osm_type": "way", "osm_id": 1}],
-    )
-    _write_rows(
-        wikidata / "wikipedia" / "documents" / "documents.parquet",
-        [{"project": "wikipedia", "document_id": "w1", "fetch_status": "ok", "full_text": "text"}],
-    )
-    _write_rows(
-        wikidata / "wikivoyage" / "documents" / "documents.parquet",
-        [{"project": "wikivoyage", "document_id": "v1", "fetch_status": "error", "full_text": ""}],
-    )
-    before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*.parquet"))
-    paths = DataPaths(tmp_path / "data", raw, wikidata, website)
+    wikidata = tmp_path / "wikidata"
+    write_source_tree(website)
+    write_wikidata_tree(wikidata)
+    run_root = tmp_path / "run"
 
-    result = load_source_membership(paths, tmp_path / "run")
+    result = load_memberships(
+        DataPaths(tmp_path / "data", tmp_path / "raw", wikidata, website), run_root
+    )
 
-    assert {item.source for item in result.diagnostics} == {
-        "website",
-        "wikipedia",
-        "wikivoyage",
-    }
-    assert {item.output_path for item in result.diagnostics} == set(result.membership_paths)
-    website_diagnostic = next(item for item in result.diagnostics if item.source == "website")
-    assert website_diagnostic.successful_key_count == 1
-    assert website_diagnostic.duplicate_key_count == 1
-    assert sorted(result.membership_paths) == [
-        tmp_path / "run" / "members" / "website.parquet",
-        tmp_path / "run" / "members" / "wikipedia.parquet",
-        tmp_path / "run" / "members" / "wikivoyage.parquet",
+    assert [path.name for path in result.paths] == ["website.parquet", "wikidata.parquet"]
+    assert sorted(
+        pq.read_table(result.paths[0]).to_pylist(), key=lambda row: (row["osm_type"], row["osm_id"])
+    ) == [
+        {"osm_type": "relation", "osm_id": 2},
+        {"osm_type": "way", "osm_id": 1},
     ]
-    for path in result.membership_paths:
-        assert pq.read_schema(path).names == ["osm_type", "osm_id"]
-    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*.parquet")) == sorted(
-        before
-        + [
-            Path("run/members/website.parquet"),
-            Path("run/members/wikipedia.parquet"),
-            Path("run/members/wikivoyage.parquet"),
-        ]
+    assert sorted(
+        pq.read_table(result.paths[1]).to_pylist(), key=lambda row: (row["osm_type"], row["osm_id"])
+    ) == [
+        {"osm_type": "relation", "osm_id": 2},
+        {"osm_type": "way", "osm_id": 1},
+    ]
+    assert not (run_root / "members" / "wikipedia.parquet").exists()
+    assert not (run_root / "scratch").exists()
+
+
+def test_load_memberships_reuses_matching_stage_without_source_queries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    website = tmp_path / "website"
+    wikidata = tmp_path / "wikidata"
+    write_source_tree(website)
+    write_wikidata_tree(wikidata)
+    paths = DataPaths(tmp_path / "data", tmp_path / "raw", wikidata, website)
+    run_root = tmp_path / "run"
+    first = load_memberships(paths, run_root)
+    manifest = json.loads((run_root / "members" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "1"
+
+    monkeypatch.setattr(
+        join_module,
+        "_write_query",
+        lambda *args, **kwargs: pytest.fail("rescanned"),
     )
+    second = load_memberships(paths, run_root, resume=True)
 
-    with pytest.raises(FileExistsError, match="membership table"):
-        load_source_membership(paths, tmp_path / "run")
-
-    resumed = load_source_membership(paths, tmp_path / "run", resume=True)
-    assert resumed.membership_paths == result.membership_paths
-    assert resumed.diagnostics == result.diagnostics
+    assert second.paths == first.paths
 
 
-def test_membership_writer_handles_nested_and_quoted_output_paths(tmp_path: Path) -> None:
-    output = tmp_path / "parent's" / "deeper" / "members.parquet"
-    connection = duckdb.connect(database=":memory:")
-    try:
-        _write_distinct_keys(
-            connection,
-            "SELECT 'way' AS osm_type, 7::BIGINT AS osm_id",
-            [],
-            output,
+def test_load_memberships_rebuilds_when_stage_manifest_or_output_is_invalid(
+    tmp_path: Path,
+) -> None:
+    website = tmp_path / "website"
+    wikidata = tmp_path / "wikidata"
+    write_source_tree(website)
+    write_wikidata_tree(wikidata)
+    paths = DataPaths(tmp_path / "data", tmp_path / "raw", wikidata, website)
+    run_root = tmp_path / "run"
+    first = load_memberships(paths, run_root)
+    manifest_path = run_root / "members" / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    first.paths[0].unlink()
+
+    result = load_memberships(paths, run_root, resume=True)
+
+    assert result.paths == first.paths
+    assert pq.read_table(result.paths[0]).num_rows == 2
+
+
+def test_load_memberships_rejects_missing_source_roots(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    with pytest.raises(ValueError, match="website polygons"):
+        load_memberships(
+            DataPaths(tmp_path / "data", tmp_path / "raw", source, source), tmp_path / "run"
         )
-        with pytest.raises(FileExistsError, match="membership table"):
-            _write_distinct_keys(
-                connection,
-                "SELECT 'way' AS osm_type, 8::BIGINT AS osm_id",
-                [],
-                output,
-            )
-    finally:
-        connection.close()
 
-    assert pq.read_table(output).to_pylist() == [{"osm_type": "way", "osm_id": 7}]
+
+def test_join_output_validation_rejects_missing_corrupt_and_wrong_schema_files(
+    tmp_path: Path,
+) -> None:
+    assert join_module._output_is_valid(tmp_path / "missing.parquet") is False
+
+    corrupt = tmp_path / "corrupt.parquet"
+    corrupt.write_bytes(b"not parquet")
+    assert join_module._output_is_valid(corrupt) is False
+
+    wrong = tmp_path / "wrong.parquet"
+    pq.write_table(pa.table({"wrong": [1]}), wrong)
+    assert join_module._output_is_valid(wrong) is False
+
+    valid = tmp_path / "valid.parquet"
+    pq.write_table(pa.Table.from_pylist([], schema=MEMBERSHIP_SCHEMA), valid)
+    assert join_module._output_is_valid(valid) is True
+
+
+def test_join_spill_cleanup_leaves_unrelated_scratch_files_alone(tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch"
+    (scratch / "keep").mkdir(parents=True)
+    (scratch / "duckdb-temp").mkdir()
+    join_module._cleanup_spill(tmp_path)
+    assert (scratch / "keep").is_dir()

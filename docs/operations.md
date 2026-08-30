@@ -1,84 +1,79 @@
 # Operations
 
-## Environment
+## Local-only execution
 
-Use Python 3.12 with [uv](https://docs.astral.sh/uv/). The project is designed
-for bounded local execution: a small bounded number of raw PBFs is streamed in
-parallel, Parquet writes are batched, and DuckDB reads source Parquets through
-read-only connections.
-Do not copy, rewrite, compact, or delete the source trees.
+Use Python 3.12 with the project dependencies already available. Do not run a
+package or data download as part of the analysis. The three input trees are
+strictly read-only:
 
-```bash
-uv sync --frozen
-uv run coverage preflight
-uv run coverage run --run-id 20260828-coverage-v5 --workers 8
-```
+- `/Volumes/Seagate M3/projects/osm-polygon-wikidata-only/raw`
+- `/Volumes/Seagate M3/projects/osm-polygon-wikidata-only/processed_v2`
+- `/Volumes/Seagate M3/projects/osm-polygon-website-tag-data/runs/geofabrik-website-v1`
 
-The worker option is bounded to a maximum of eight independent PBF workers;
-the default is four.
-
-The `run` command extracts all sorted regular raw PBFs, joins successful source
-memberships, aggregates global/per-PBF/per-region coverage, renders reports,
-and writes a manifest only after required generated Parquets, schemas, and
-cross-counts validate. Global coverage is always materialized as 64 shards;
-zero-result PBFs still have schema-only occurrence and failure shards. Use a
-coverage-only run for the fast identity/provenance pass. Add
-`--with-geometry` for assembled geometries and area metrics.
-
-Aggregation uses the run-local `scratch/duckdb-temp/` directory on the Seagate
-project volume, disables insertion-order preservation, uses four DuckDB
-threads, and stops spilling at 100 GB. This keeps large joins recoverable
-without filling the Mac system volume. The spill directory is removed after
-DuckDB closes, including after an aggregation error; a resumed run also clears
-any stale spill directory left by an abrupt process termination.
-
-Extraction is resumable at PBF boundaries. The default `--resume` mode stores
-one atomic JSON checkpoint per completed PBF under `checkpoints/`; a checkpoint
-is accepted only when the source filename, size, mtime, occurrence/failure
-counts, extraction mode, hashes, row counts, schemas, and both source shard
-families still agree. Missing or incomplete
-outputs are cleaned for that PBF and rescanned. Membership, aggregation,
-reports, and the completion manifest are also rebuilt atomically on resume, so
-an interruption in any later stage can reuse the completed extraction. Use
-`--fresh` with a new run ID to force a clean run.
-
-For example, rerun the same interrupted run with:
+Preflight lists the sorted raw PBF inventory without touching source data:
 
 ```bash
-uv run coverage run --run-id 20260828-coverage-v5 --workers 8 --resume
+PYTHONPATH=src python -m osm_polygon_wikidata_website_coverage.cli preflight
 ```
 
-Use a new ID and `--fresh` when inputs or processing options intentionally
-change. An existing aggregate output is never overwritten during a fresh run.
-
-## Storage contract
-
-Input roots are read-only. All run outputs must be below
-`/Volumes/Seagate M3/projects/osm-polygon-wikidata-website-coverage-stats/runs/`.
-The local Git repository contains code, documentation, tests, and tiny
-fixtures only. Raw PBFs, source Parquets, fetched text, credentials, caches,
-and run outputs are excluded from Git.
-
-## Hugging Face staging
-
-After a run is complete, stage only its compact coverage and summary outputs:
+Run the overlap calculation with bounded resources:
 
 ```bash
-uv run coverage stage-hf \
-  /Volumes/Seagate\ M3/projects/osm-polygon-wikidata-website-coverage-stats/runs/20260828-coverage-v5 \
-  --destination /private/tmp/osm-polygon-coverage-hf
+PYTHONPATH=src python -m osm_polygon_wikidata_website_coverage.cli run \
+  --run-id 20260829-website-wikidata-overlap-v1 \
+  --workers 1 --batch-rows 100000
 ```
 
-Inspect every staged Parquet schema before upload. The staging boundary rejects
-full geometry, text fields, raw inputs, cache directories, credentials, and
-arbitrary paths. The public dataset is
-`NoeFlandre/osm-polygon-wikidata-website-coverage-stats`.
+The default is resumable. `--fresh` refuses to overwrite an existing overlap
+stage and is intended for a new run ID.
 
-## Troubleshooting
+## Stage boundaries
 
-If a PBF is missing, unreadable, or changes size/mtime while it is being
-scanned, the run fails closed and no complete manifest is written. If source
-schemas do not contain the required status/text columns, source membership
-loading stops before any source write. A busy Hugging Face Dataset Viewer does
-not by itself mean files are missing; verify the remote file inventory and
-Parquet schemas directly.
+Each regular raw PBF produces one atomic identity Parquet and one checkpoint
+under `runs/<run-id>/`. A checkpoint is reused only when the source filename,
+size, modification time, SHA-256, scanner mode, output schema, row count, and
+output-file metadata still match.
+
+For a new scan, the source PBF is hashed once before parsing; the post-scan
+integrity check uses its size and modification time, avoiding a second full
+PBF read. On resume, unchanged source size and modification time reuse the
+stored digest without rereading the PBF; a changed or incomplete checkpoint
+falls back to a full hash and is rejected unless it matches. This fast path
+relies on the declared strict read-only source roots.
+
+The source membership stage writes exactly two local key tables:
+`members/website.parquet` and `members/wikidata.parquet`. Their source-file
+inventory is recorded in `members/manifest.json` and is checked before reuse.
+
+The overlap stage reads the raw identity files once, joins the two local key
+tables, hash-partitions classified occurrences, deduplicates within each of 64
+deterministic shards, and writes one four-row summary. The coverage manifest is
+promoted only after all outputs validate.
+
+## Resource and storage contract
+
+Raw identity batches are bounded to `100000` rows by default and extraction is
+single-worker by default because concurrent reads contend on the Seagate disk.
+DuckDB is configured with a `3GB` memory limit, four threads, disabled
+insertion-order preservation, and a run-local temporary directory. This leaves
+headroom under the 5 GB resident memory budget.
+
+All transient files are below the Seagate run root, including
+`scratch/duckdb-temp/`. The scratch tree is removed after the DuckDB connection
+closes, including failure cleanup. The local Git checkout contains no source
+data or run output.
+
+## Output layout
+
+```text
+runs/<run-id>/
+├── raw-identities/<pbf-stem>.parquet
+├── checkpoints/<pbf-stem>.json
+├── members/{website,wikidata}.parquet
+├── coverage/overlap/shard-00.parquet ... shard-63.parquet
+├── coverage/overlap-summary.parquet
+└── manifests/manifest.json
+```
+
+The row-level files contain only `osm_type`, `osm_id`, `website`, `wikidata`,
+and `overlap_category`. No source text or geometry is copied.

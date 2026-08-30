@@ -1,44 +1,40 @@
 # Architecture
 
-The package is organized around deep modules with small interfaces:
+The code is organized as a few deep modules with narrow boundaries:
 
 ```text
-raw PBFs -> libosmium structural/area stream -> normalized occurrence shards
-source Parquets -> read-only DuckDB predicates -> key-only memberships
-occurrences + memberships -> DuckDB global deduplication -> compact coverage
-compact summary -> JSON / Markdown / static charts / HF staging
+raw PBFs -> libosmium structural identity stream -> one Parquet per PBF
+source Parquets -> read-only DuckDB predicates -> two local membership tables
+raw identity files + memberships -> DuckDB partition-first projection -> 64 shards
+overlap shards -> four-category summary and completion manifests
 ```
 
-`config.paths` owns the storage contract. `domain.identity`,
-`domain.coverage`, and `domain.geometry` are pure or nearly pure values and
-calculations. `io.pbf` is the libosmium boundary; `io.parquet` is the bounded
-atomic writer boundary. `sources` never writes to the selected website or
-Wikidata roots. `pipeline` coordinates stages, while `reporting` and the thin
-CLI expose public artifacts and commands.
+`config.paths` owns the Seagate-only storage contract and prevents output/source
+overlap. `domain.identity` and `domain.coverage` contain the stable key and
+pure two-set category rules. `io.pbf` is the libosmium boundary and never
+requests node locations. `io.parquet` provides bounded Arrow batches and
+atomic promotion.
 
-The default coverage-only raw stream uses libosmium with locations disabled and
-emits every structurally closed way, including untagged ways. Its relation
-candidate filter uses only the structural `type=multipolygon` or
-`type=boundary` relation tag; this is geometry classification, not a content
-tag filter. Nodes and open ways do not reach the occurrence writer. The
-optional `--with-geometry` stream enables the area assembler and node
-locations, then captures geometry failures with identity and diagnostic
-context when available. Independent PBFs may be streamed by a bounded process
-pool; results and source inventories are returned in deterministic filename
-order, while each worker writes only its own source-stem shards.
+The website and Wikimedia source modules validate only required Parquet
+metadata, then expose read-only DuckDB query parameters. Website text is
+successful non-empty `website` or `contact:website` text. Wikidata membership
+is one union of successful non-empty Wikipedia and Wikivoyage documents. The
+processed link files already use original OSM IDs.
 
-Global aggregation partitions compact coverage rows into 64 deterministic
-shards using a stable identity hash. It chooses one canonical occurrence but
-retains the distinct source-PBF list and contributing-PBF count. Text is never
-selected into an output query. Generated Parquet outputs are atomically
-promoted, schema-checked, hashed, and listed in the completion manifest.
-DuckDB spill files are kept under the run's Seagate-backed `scratch/` directory
-with insertion-order preservation disabled, four execution threads, and a
-100 GB spill ceiling so aggregation cannot silently consume the system volume.
-The run removes the `scratch/duckdb-temp/` spill directory after DuckDB closes;
-resume also clears stale spill files left by an abrupt termination.
+`pipeline.extract` scans PBFs independently, keeps one bounded writer per
+source, and checkpoints at PBF boundaries. `pipeline.join` materializes the two
+membership tables once. `pipeline.overlap` loads those tables once, computes
+both flags and the category in one projection, hash-partitions identity
+occurrences, and deduplicates each partition independently. This bounds the
+largest deduplication working set without changing the result: all occurrences
+of one identity have the same hash shard. No per-shard source rescan, geometry
+assembler, report renderer, or publisher is in the run path.
 
-The quality contract is RED→GREEN→REFACTOR with pytest, 100% branch/line
-coverage, Ruff, ty, CRAP below 6, and mutation testing with no surviving or
-unchecked mutants. Public documentation is built with strict MkDocs. Docker
-contains the package only and never copies Seagate data.
+DuckDB is limited to 3 GB and four threads. Its spill directory is under the
+Seagate run root and is deleted after the connection closes. Python never loads
+a whole PBF, source tree, or raw universe into memory.
+
+The quality contract is RED→GREEN→REFACTOR with pytest, branch coverage,
+Ruff, ty, CRAP below 6, mutation testing, strict MkDocs, and a Docker image
+that contains code only. The source roots and the paused prior run are not
+modified by this project.

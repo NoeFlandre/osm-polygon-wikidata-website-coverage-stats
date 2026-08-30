@@ -1,83 +1,64 @@
 # Methodology
 
-## Sets and denominator
+## Universe and denominator
 
-Let `U` be the unique set of raw structural polygon identities emitted from
-all raw PBFs. The identity key is `(osm_type, osm_id)`, with `osm_type`
-restricted to `way` and `relation`. Closed ways are identified structurally
-from their node sequence, including untagged ways. Relations are candidate
-polygons only when their structural `type` is `multipolygon` or `boundary`;
-this is not a content-tag filter. Duplicate raw occurrences collapse
-globally; the highest OSM version wins, then the newest timestamp, then the
-lexicographically smallest source PBF. All contributing PBF names remain in
-provenance, together with their distinct count.
+Let `U` be the unique set of `(osm_type, osm_id)` identities emitted from all
+regular raw PBFs. `osm_type` is restricted to `way` and `relation`.
 
-The default coverage-only denominator is `|U|`, the raw structural candidate
-universe. It intentionally avoids geometry assembly because the coverage
-question is about membership of raw polygon identities. The optional
-`--with-geometry` mode additionally assembles and validates polygon geometry;
-its invalid candidates are recorded in a separate geometry-failure audit and
-excluded from that mode's valid-geometry denominator. Source membership keys
-that do not occur in `U` are also reported separately and do not enlarge the
-denominator.
+A way enters `U` when libosmium reports it as closed and its node sequence
+contains at least three distinct node references. A relation enters `U` when
+its structural `type` is `multipolygon` or `boundary`. These are structural
+polygon rules, not content-tag filters. Duplicate appearances across PBFs are
+collapsed by the identity key.
 
-## Successful text predicates
+The denominator is `|U|`. Source memberships that do not occur in `U` do not
+enlarge it and are not emitted as overlap rows.
 
-Website membership is true when either independent field succeeds:
+## Website membership
+
+An identity is in `W` when at least one of these independent fields has a
+successful, non-empty value after trimming:
 
 ```text
-website_text_status == "success" and website_text is nonempty after trim
+website_text_status == "success" and website_text is non-empty
 OR
-contact_website_text_status == "success" and contact_website_text is nonempty after trim
+contact_website_text_status == "success" and contact_website_text is non-empty
 ```
 
-Wikipedia and Wikivoyage membership is evaluated separately. A linked document
-must belong to the requested project, have `fetch_status == "ok"`, and have
-nonempty `full_text` after trim. All successful V2 document links are eligible,
-including direct Wikipedia-tag links and links discovered through Wikidata
-sitelinks. Multiple successful documents still produce one Boolean membership
-per source and polygon identity.
+Only `way` and `relation` rows are considered. The source Parquets are queried
+read-only and only the resulting identity set is materialized locally.
 
-## Overlap categories
+## Wikidata membership
 
-Every identity receives exactly one of these eight categories:
+An identity is in `D` when a row in
+`processed_v2/polygon_document_links/` links it to a Wikipedia or Wikivoyage
+document whose `fetch_status` is `ok` and whose `full_text` is non-empty after
+trimming. Wikipedia and Wikivoyage are intentionally unioned into one
+Wikidata coverage set.
 
-| Website | Wikipedia | Wikivoyage | Category |
-| --- | --- | --- | --- |
-| no | no | no | neither |
-| yes | no | no | website only |
-| no | yes | no | Wikipedia only |
-| no | no | yes | Wikivoyage only |
-| yes | yes | no | website + Wikipedia only |
-| yes | no | yes | website + Wikivoyage only |
-| no | yes | yes | Wikipedia + Wikivoyage only |
-| yes | yes | yes | all three |
+The processed link schema stores the original OSM identity, so the join uses
+`osm_type` and `osm_id` directly. No Area ID parity conversion is applied.
+Multiple links and documents collapse to one membership key.
 
-The category counts sum to the valid raw polygon universe. Pairwise and triple
-intersections are reported in addition to the mutually exclusive categories.
+## Overlap
 
-## Geometry
+For every `u` in `U`, the pipeline computes `u in W` and `u in D` in one
+DuckDB projection, then assigns the mutually exclusive category shown below:
 
-The libosmium GeoJSON area is accepted only as Polygon or MultiPolygon. Invalid
-nonempty polygonal shapes are repaired with Shapely `buffer(0)` only when the
-result remains Polygon or MultiPolygon. Empty, degenerate, out-of-bounds, and
-antimeridian-spanning shapes fail closed.
+| Category | Definition |
+| --- | --- |
+| `neither` | `u` is in neither `W` nor `D` |
+| `website_only` | `u` is in `W` but not `D` |
+| `wikidata_only` | `u` is in `D` but not `W` |
+| `both` | `u` is in both `W` and `D` |
 
-Coordinates are rounded to seven decimal places for a stable local geometry
-representation and hash. Area uses `pyproj.Geod` on WGS84. Centroids use a
-local Lambert azimuthal equal-area projection, then transform back to WGS84.
-Outputs retain geometry type, centroid, bounding box, area, area bucket, and
-geometry hash; full geometry is kept only in local run occurrence shards.
+Counts sum to `|U|`. Percentages in the summary are counts divided by `|U|`;
+an empty universe yields four zero percentages.
 
-The public compact row exposes the source flags as `website`, `wikipedia`, and
-`wikivoyage`, plus `contributing_pbf_count` and the JSON `source_pbfs` list.
-Per-source-PBF and per-region metric tables repeat the coverage rates, all
-eight overlap categories, area statistics, and OSM/geometry type counts.
+## Data boundary
 
-## Licensing and attribution
-
-Code and documentation are Apache-2.0. Polygon identities and geometry-derived
-descriptors are derived from OpenStreetMap data and are distributed with ODbL
-and OpenStreetMap attribution obligations. Raw PBF provenance is recorded for
-reproducibility. Website, Wikipedia, and Wikivoyage fetched text is used only
-as a read-only success predicate and is not republished by this project.
+The result contains identities, two Boolean flags, and the category. It does
+not contain raw PBF bytes, geometry, coordinates, source tags, website text,
+Wikipedia text, Wikivoyage text, or fetch caches. Code and documentation are
+Apache-2.0. OSM-derived identities remain subject to OpenStreetMap
+attribution and ODbL obligations.

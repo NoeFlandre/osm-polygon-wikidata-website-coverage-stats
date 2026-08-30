@@ -12,12 +12,8 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Noe Flandre" }]
 dependencies = [
     "duckdb>=1.1",
-    "matplotlib>=3.9",
     "osmium>=4.3.1",
     "pyarrow>=18",
-    "pyproj>=3.7",
-    "rich>=13",
-    "shapely>=2.0",
     "typer>=0.15",
 ]
 
@@ -75,13 +71,6 @@ show_missing = true
 source_paths = ["src/osm_polygon_wikidata_website_coverage"]
 also_copy = ["CITATION.cff", "LICENSE"]
 pytest_add_cli_args_test_selection = [
-    "tests/config",
-    "tests/domain",
-    "tests/io",
-    "tests/pipeline",
-    "tests/sources",
-    "tests/cli",
-    "tests/publishing",
-    "tests/reporting",
+    "tests",
 ]
 runner = "uv run pytest -q"

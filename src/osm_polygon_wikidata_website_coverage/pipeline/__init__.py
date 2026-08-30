@@ -1,1 +1,1 @@
-"""Pipeline orchestration modules."""
+"""Resumable raw extraction, membership, and overlap pipeline modules."""

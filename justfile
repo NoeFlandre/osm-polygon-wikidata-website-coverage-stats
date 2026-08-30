@@ -1,27 +1,27 @@
 set shell := ["zsh", "-eu -o pipefail", "-c"]
 
-cache := "/private/tmp/osm-polygon-coverage-uv-cache"
+cache := "/Volumes/Seagate M3/projects/osm-polygon-wikidata-website-coverage-stats/.uv-cache"
 
 sync:
-	UV_CACHE_DIR={{cache}} uv sync
+	UV_CACHE_DIR={{cache}} uv sync --frozen --offline
 
 test:
-	UV_CACHE_DIR={{cache}} uv run pytest --cov=src/osm_polygon_wikidata_website_coverage --cov-branch --cov-fail-under=100
+	UV_CACHE_DIR={{cache}} uv run --offline pytest --cov=src/osm_polygon_wikidata_website_coverage --cov-branch --cov-fail-under=100
 
 lint:
-	UV_CACHE_DIR={{cache}} uv run ruff format --check .
-	UV_CACHE_DIR={{cache}} uv run ruff check .
+	UV_CACHE_DIR={{cache}} uv run --offline ruff format --check .
+	UV_CACHE_DIR={{cache}} uv run --offline ruff check .
 
 typecheck:
-	UV_CACHE_DIR={{cache}} uv run ty check src tests
+	UV_CACHE_DIR={{cache}} uv run --offline ty check src tests
 
 docs:
-	UV_CACHE_DIR={{cache}} uv run mkdocs build --strict
+	UV_CACHE_DIR={{cache}} uv run --offline mkdocs build --strict
 
 crap:
-	UV_CACHE_DIR={{cache}} uv run python scripts/check_crap.py
+	UV_CACHE_DIR={{cache}} uv run --offline python scripts/check_crap.py
 
 mutation:
-	UV_CACHE_DIR={{cache}} uv run mutmut run --max-children 2
+	UV_CACHE_DIR={{cache}} uv run --offline mutmut run --max-children 2
 
-qa: sync lint typecheck test docs crap mutation
+qa: lint typecheck test docs crap mutation
