@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = next(
@@ -30,3 +31,9 @@ def test_project_uses_apache_license_and_quality_tools() -> None:
     assert "ty" in metadata
     assert "mutmut" in metadata
     assert "Apache License" in license_text
+
+
+def test_pytest_resolves_source_and_project_test_packages() -> None:
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert config["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src", "."]

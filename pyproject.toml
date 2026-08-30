@@ -41,6 +41,7 @@ packages = ["src/osm_polygon_wikidata_website_coverage"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
