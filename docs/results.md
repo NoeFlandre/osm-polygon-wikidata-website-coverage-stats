@@ -17,6 +17,24 @@ The current run uses a broad Wikimedia-text membership predicate. Under that
 predicate, `303,195` raw polygon identities are covered. A strict
 Wikidata-sitelink interpretation gives `288,007` raw polygon identities.
 
+## HF polygon-inventory identity overlap
+
+A separate comparison of the local Parquet snapshots corresponding to the
+published Hugging Face polygon inventories gives the following unique OSM
+identity counts:
+
+| Dataset or comparison | Unique polygons |
+| --- | ---: |
+| OSM Polygon–Wikidata–Wikipedia | 1,188,854 |
+| OSM Polygon–Website Tag | 1,678,146 |
+| Shared identities between both datasets | 1,309 |
+
+These are inventory-level `(osm_type, osm_id)` identity counts. They are not
+counts of polygons with non-empty text and do not use the raw-PBF universe.
+They were computed from the local snapshots without downloading from Hugging
+Face; the small reproducibility artifacts are stored in
+`runs/20260831-hf-snapshot-overlap-v1/`.
+
 ## Verified counts
 
 All counts below are unique `(osm_type, osm_id)` identities unless explicitly
