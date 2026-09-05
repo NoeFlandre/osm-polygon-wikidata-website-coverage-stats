@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
 from osm_polygon_wikidata_website_coverage.io.atomic import read_json_object, write_json
 from osm_polygon_wikidata_website_coverage.io.duckdb import configure_connection, export_query
-from osm_polygon_wikidata_website_coverage.io.parquet import MEMBERSHIP_SCHEMA
+from osm_polygon_wikidata_website_coverage.io.parquet import (
+    MEMBERSHIP_SCHEMA,
+    parquet_matches_schema,
+)
 from osm_polygon_wikidata_website_coverage.sources._files import file_inventory
 from osm_polygon_wikidata_website_coverage.sources.website import (
     WEBSITE_SUCCESS_SQL,
@@ -37,9 +38,6 @@ class MembershipResult:
     manifest_path: Path | None = None
 
 
-_write_query = export_query
-
-
 def _source_inventory(paths: DataPaths) -> list[dict[str, Any]]:
     website_files = validate_website_source(paths.website_root)
     link_files, document_files = validate_wikidata_source(paths.wikidata_root)
@@ -59,18 +57,8 @@ def _manifest_path(run_root: Path) -> Path:
     return run_root / "members" / "manifest.json"
 
 
-def _read_manifest(path: Path) -> dict[str, Any] | None:
-    return read_json_object(path)
-
-
 def _output_is_valid(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        metadata = pq.ParquetFile(path).metadata
-        return metadata is not None and pq.read_schema(path) == MEMBERSHIP_SCHEMA
-    except (OSError, ValueError, pa.ArrowException):
-        return False
+    return path.is_file() and parquet_matches_schema(path, MEMBERSHIP_SCHEMA)
 
 
 def _stage_is_reusable(
@@ -78,7 +66,7 @@ def _stage_is_reusable(
     outputs: tuple[Path, Path],
     source_inventory: list[dict[str, Any]],
 ) -> bool:
-    manifest = _read_manifest(_manifest_path(run_root))
+    manifest = read_json_object(_manifest_path(run_root))
     return bool(
         manifest
         and manifest.get("schema_version") == "1"
@@ -116,13 +104,13 @@ def load_memberships(paths: DataPaths, run_root: Path, *, resume: bool = False) 
     connection = duckdb.connect(database=":memory:")
     try:
         configure_connection(connection, run_root)
-        _write_query(
+        export_query(
             connection,
             WEBSITE_SUCCESS_SQL,
             website_success_parameters(paths.website_root),
             outputs[0],
         )
-        _write_query(
+        export_query(
             connection,
             WIKIDATA_SUCCESS_SQL,
             wikidata_success_parameters(paths.wikidata_root),

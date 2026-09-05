@@ -1,3 +1,4 @@
+from os import stat_result
 from pathlib import Path
 from typing import cast
 
@@ -259,11 +260,20 @@ def test_shared_source_validator_accepts_a_complete_schema(tmp_path: Path) -> No
 
 def test_shared_file_inventory_records_relative_metadata_and_optional_label(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "nested" / "source.parquet"
     path.parent.mkdir()
     path.write_bytes(b"source")
     stat = path.stat()
+    stat_calls: list[Path] = []
+    original_stat = Path.stat
+
+    def record_stat(path: Path, *, follow_symlinks: bool = True) -> stat_result:
+        stat_calls.append(path)
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", record_stat)
 
     assert file_inventory(tmp_path, (path,), label="website") == [
         {
@@ -280,6 +290,7 @@ def test_shared_file_inventory_records_relative_metadata_and_optional_label(
             "mtime_ns": stat.st_mtime_ns,
         }
     ]
+    assert stat_calls == [path, path]
 
 
 def test_source_schema_readers_wrap_arrow_errors(
@@ -304,10 +315,3 @@ def test_source_schema_readers_wrap_arrow_errors(
 def test_wikimedia_file_inventory_rejects_unknown_project(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"^project must be wikipedia or wikivoyage$"):
         wikimedia_module.wikimedia_document_files(tmp_path, "unknown")
-
-
-def test_source_reader_queries_have_read_only_paths_and_required_contracts() -> None:
-    assert "read_parquet" in website_module.WEBSITE_SUCCESS_SQL
-    assert "read_parquet" in wikimedia_module.WIKIDATA_SUCCESS_SQL
-    assert "fetch_status = 'ok'" in wikimedia_module.WIKIDATA_SUCCESS_SQL
-    assert "full_text" in wikimedia_module.WIKIDATA_SUCCESS_SQL

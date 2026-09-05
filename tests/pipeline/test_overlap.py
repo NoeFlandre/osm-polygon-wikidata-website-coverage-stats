@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import NoReturn, cast
 
 import pyarrow as pa
@@ -9,7 +9,6 @@ import pytest
 import osm_polygon_wikidata_website_coverage.pipeline.overlap as overlap_module
 from osm_polygon_wikidata_website_coverage.io.parquet import (
     IDENTITY_SCHEMA,
-    MEMBERSHIP_SCHEMA,
     OVERLAP_SCHEMA,
     SUMMARY_SCHEMA,
 )
@@ -29,13 +28,6 @@ def _identity_file(root: Path, name: str, rows: list[dict[str, object]]) -> Path
     return path
 
 
-def _membership_file(root: Path, name: str, rows: list[dict[str, object]]) -> Path:
-    path = root / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows, schema=MEMBERSHIP_SCHEMA), path)
-    return path
-
-
 def test_compute_overlap_deduplicates_raw_ids_and_writes_four_categories(
     tmp_path: Path,
 ) -> None:
@@ -51,8 +43,8 @@ def test_compute_overlap_deduplicates_raw_ids_and_writes_four_categories(
     )
     _identity_file(raw, "b.parquet", [{"osm_type": "way", "osm_id": 1}])
     members = tmp_path / "members"
-    website = _membership_file(members, "website.parquet", [{"osm_type": "way", "osm_id": 1}])
-    wikidata = _membership_file(
+    website = _identity_file(members, "website.parquet", [{"osm_type": "way", "osm_id": 1}])
+    wikidata = _identity_file(
         members,
         "wikidata.parquet",
         [{"osm_type": "way", "osm_id": 2}, {"osm_type": "relation", "osm_id": 3}],
@@ -145,8 +137,8 @@ def test_compute_overlap_uses_bounded_duckdb_configuration_and_reuses_stage(
     raw = tmp_path / "raw-identities"
     _identity_file(raw, "raw.parquet", [{"osm_type": "way", "osm_id": 1}])
     members = tmp_path / "members"
-    website = _membership_file(members, "website.parquet", [])
-    wikidata = _membership_file(members, "wikidata.parquet", [])
+    website = _identity_file(members, "website.parquet", [])
+    wikidata = _identity_file(members, "wikidata.parquet", [])
     output = tmp_path / "run"
 
     first = compute_overlap(raw, MembershipResult((website, wikidata)), output)
@@ -156,7 +148,7 @@ def test_compute_overlap_uses_bounded_duckdb_configuration_and_reuses_stage(
     def fail_if_recomputed(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("recomputed")
 
-    monkeypatch.setattr(overlap_module, "_run_overlap_query", fail_if_recomputed)
+    monkeypatch.setattr(overlap_module, "_write_partitioned_overlap", fail_if_recomputed)
     second = compute_overlap(raw, MembershipResult((website, wikidata)), output, resume=True)
     assert second == first
 
@@ -167,8 +159,8 @@ def test_compute_overlap_rebuilds_invalid_resume_outputs_and_validates_inputs(
     raw = tmp_path / "raw-identities"
     _identity_file(raw, "raw.parquet", [{"osm_type": "way", "osm_id": 1}])
     members = tmp_path / "members"
-    website = _membership_file(members, "website.parquet", [])
-    wikidata = _membership_file(members, "wikidata.parquet", [])
+    website = _identity_file(members, "website.parquet", [])
+    wikidata = _identity_file(members, "wikidata.parquet", [])
     output = tmp_path / "run"
     compute_overlap(raw, MembershipResult((website, wikidata)), output)
     (output / "coverage" / "manifest.json").write_text("{}", encoding="utf-8")
@@ -209,33 +201,6 @@ def test_overlap_validators_reject_missing_corrupt_and_wrong_schema_inputs(
     with pytest.raises(OverlapError, match="schema mismatch"):
         overlap_module._validate_membership_path(wrong)
 
-    assert overlap_module._output_is_valid(tmp_path / "missing-overlap.parquet") is False
-    assert overlap_module._summary_is_valid(tmp_path / "missing-summary.parquet") is False
-    valid_overlap = tmp_path / "valid-overlap.parquet"
-    pq.write_table(pa.Table.from_pylist([], schema=OVERLAP_SCHEMA), valid_overlap)
-    assert overlap_module._output_is_valid(valid_overlap) is True
-    valid_summary = tmp_path / "valid-summary.parquet"
-    pq.write_table(pa.Table.from_pylist([], schema=SUMMARY_SCHEMA), valid_summary)
-    assert overlap_module._summary_is_valid(valid_summary) is True
-
-
-def test_parquet_schema_validator_accepts_each_expected_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    overlap = tmp_path / "overlap.parquet"
-    summary = tmp_path / "summary.parquet"
-    pq.write_table(pa.Table.from_pylist([], schema=OVERLAP_SCHEMA), overlap)
-    pq.write_table(pa.Table.from_pylist([], schema=SUMMARY_SCHEMA), summary)
-
-    assert overlap_module._parquet_matches_schema(overlap, OVERLAP_SCHEMA) is True
-    assert overlap_module._parquet_matches_schema(summary, SUMMARY_SCHEMA) is True
-    monkeypatch.setattr(
-        overlap_module.pq,
-        "ParquetFile",
-        lambda path: cast(object, type("MetadataOnly", (), {"metadata": None})()),
-    )
-    assert overlap_module._parquet_matches_schema(overlap, OVERLAP_SCHEMA) is False
-
 
 def test_overlap_path_helpers_keep_the_persisted_layout(tmp_path: Path) -> None:
     assert overlap_module._overlap_root(tmp_path) == tmp_path / "coverage" / "overlap"
@@ -243,32 +208,26 @@ def test_overlap_path_helpers_keep_the_persisted_layout(tmp_path: Path) -> None:
         tmp_path / "coverage" / "overlap-summary.parquet"
     )
     assert overlap_module._manifest_path(tmp_path) == tmp_path / "coverage" / "manifest.json"
-    assert overlap_module._scratch_root(tmp_path) == tmp_path / "scratch"
 
 
 def test_stage_manifest_requires_a_manifest() -> None:
     assert overlap_module._stage_manifest_matches(None, [], []) is False
 
 
-def test_identity_files_are_sorted_by_filename_not_path_comparison() -> None:
-    class ReversedPath:
-        def __init__(self, name: str) -> None:
-            self.name = name
+def test_identity_files_are_sorted_by_filename(tmp_path: Path) -> None:
+    second = _identity_file(tmp_path, "b.parquet", [])
+    first = _identity_file(tmp_path, "a.parquet", [])
 
-        def __lt__(self, other: "ReversedPath") -> bool:
-            return self.name > other.name
+    assert overlap_module._identity_files(tmp_path) == (first, second)
 
-    class Root:
-        def is_dir(self) -> bool:
-            return True
 
-        def glob(self, pattern: str) -> tuple[ReversedPath, ...]:
-            assert pattern == "*.parquet"
-            return ReversedPath("b.parquet"), ReversedPath("a.parquet")
+def test_identity_file_order_remains_case_sensitive_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = (PureWindowsPath("C:/raw/a.parquet"), PureWindowsPath("C:/raw/B.parquet"))
+    monkeypatch.setattr(Path, "glob", lambda root, pattern: iter(files))
 
-    files = overlap_module._identity_files(cast(Path, Root()))
-
-    assert [path.name for path in files] == ["a.parquet", "b.parquet"]
+    assert overlap_module._identity_files(tmp_path) == (files[1], files[0])
 
 
 def test_empty_overlap_output_uses_the_required_schema_and_compression(
@@ -502,8 +461,8 @@ def test_compute_overlap_forwards_inventories_and_runtime_values(
     members = tmp_path / "members"
     website_root = members / "website"
     wikidata_root = members / "wikidata"
-    website = _membership_file(website_root, "website.parquet", [])
-    wikidata = _membership_file(wikidata_root, "wikidata.parquet", [])
+    website = _identity_file(website_root, "website.parquet", [])
+    wikidata = _identity_file(wikidata_root, "wikidata.parquet", [])
     output_root = tmp_path / "nested" / "run"
     raw_inventory: list[dict[str, object]] = [{"source": "raw"}]
     membership_inventory: list[dict[str, object]] = [{"source": "members"}]
@@ -522,7 +481,7 @@ def test_compute_overlap_forwards_inventories_and_runtime_values(
         seen_database.append(database)
         return Connection()
 
-    def inventory(paths: tuple[Path, ...], root: Path) -> list[dict[str, object]]:
+    def inventory(root: Path, paths: tuple[Path, ...]) -> list[dict[str, object]]:
         inventory_calls = captured.setdefault("inventory_calls", [])
         cast(list[object], inventory_calls).append((paths, root))
         return raw_inventory if root == raw else membership_inventory
@@ -540,11 +499,16 @@ def test_compute_overlap_forwards_inventories_and_runtime_values(
     monkeypatch.setattr(overlap_module.duckdb, "connect", connect)
     monkeypatch.setattr(overlap_module, "configure_connection", lambda *args: None)
     monkeypatch.setattr(overlap_module, "_load_membership_tables", lambda *args: None)
-    monkeypatch.setattr(overlap_module, "_inventory", inventory)
-    monkeypatch.setattr(overlap_module, "_run_overlap_query", lambda *args: (shard,))
+    monkeypatch.setattr(overlap_module, "file_inventory", inventory)
+    monkeypatch.setattr(overlap_module, "_write_partitioned_overlap", lambda *args: (shard,))
     monkeypatch.setattr(overlap_module, "_summary_rows", lambda *args: (summary_rows, summary))
     monkeypatch.setattr(overlap_module, "_write_summary", lambda *args: summary_path)
     monkeypatch.setattr(overlap_module, "_write_manifest", write_manifest)
+    monkeypatch.setattr(
+        overlap_module.shutil,
+        "rmtree",
+        lambda path, *, ignore_errors: captured.update(cleanup=(path, ignore_errors)),
+    )
 
     result = compute_overlap(raw, MembershipResult((website, wikidata)), output_root)
 
@@ -565,6 +529,8 @@ def test_compute_overlap_forwards_inventories_and_runtime_values(
     assert result.summary_path == summary_path
     assert result.row_count == 10
     assert result.summary == summary
+    assert captured["closed"] is True
+    assert captured["cleanup"] == (output_root / "scratch", True)
 
 
 def test_overlap_stage_rejects_incomplete_shard_inventory_and_cleans_failed_scratch(
@@ -573,12 +539,12 @@ def test_overlap_stage_rejects_incomplete_shard_inventory_and_cleans_failed_scra
     raw = tmp_path / "raw"
     raw_file = _identity_file(raw, "raw.parquet", [{"osm_type": "way", "osm_id": 1}])
     members = tmp_path / "members"
-    website = _membership_file(members, "website.parquet", [])
-    wikidata = _membership_file(members, "wikidata.parquet", [])
+    website = _identity_file(members, "website.parquet", [])
+    wikidata = _identity_file(members, "wikidata.parquet", [])
     output = tmp_path / "run"
     compute_overlap(raw, MembershipResult((website, wikidata)), output)
-    raw_inventory = overlap_module._inventory((raw_file,), raw)
-    membership_inventory = overlap_module._inventory((website, wikidata), members)
+    raw_inventory = overlap_module.file_inventory(raw, (raw_file,))
+    membership_inventory = overlap_module.file_inventory(members, (website, wikidata))
     (output / "coverage" / "overlap-summary.parquet").unlink()
     assert overlap_module._stage_is_reusable(output, raw_inventory, membership_inventory) is False
     compute_overlap(raw, MembershipResult((website, wikidata)), output, resume=True)
@@ -607,8 +573,8 @@ def test_overlap_rejects_unknown_summary_category_and_fresh_overwrite(
     raw = tmp_path / "raw"
     _identity_file(raw, "raw.parquet", [{"osm_type": "way", "osm_id": 1}])
     members = tmp_path / "members"
-    website = _membership_file(members, "website.parquet", [])
-    wikidata = _membership_file(members, "wikidata.parquet", [])
+    website = _identity_file(members, "website.parquet", [])
+    wikidata = _identity_file(members, "wikidata.parquet", [])
     output = tmp_path / "run"
     compute_overlap(raw, MembershipResult((website, wikidata)), output)
     with pytest.raises(FileExistsError, match="overwrite"):

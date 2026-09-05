@@ -2,25 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 from osm_polygon_wikidata_website_coverage.config.paths import DataPaths
-from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.io.atomic import write_json
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
 from osm_polygon_wikidata_website_coverage.pipeline.extract import (
     ExtractionResult,
+    Scanner,
     extract_all,
     scanner_mode,
 )
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult, load_memberships
 from osm_polygon_wikidata_website_coverage.pipeline.overlap import OverlapResult, compute_overlap
-
-Scanner = Callable[[Path, Callable[[OsmIdentity], None]], None]
 
 
 @dataclass(frozen=True, slots=True)

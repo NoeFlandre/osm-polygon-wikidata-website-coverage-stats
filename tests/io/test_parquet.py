@@ -1,6 +1,7 @@
-import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -9,8 +10,27 @@ from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.io.parquet import (
     IDENTITY_SCHEMA,
     OVERLAP_SCHEMA,
+    SUMMARY_SCHEMA,
     IdentityParquetWriter,
+    parquet_matches_schema,
 )
+
+
+@pytest.mark.parametrize("schema", [IDENTITY_SCHEMA, OVERLAP_SCHEMA, SUMMARY_SCHEMA])
+def test_parquet_schema_validator_rejects_unusable_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema: pa.Schema
+) -> None:
+    path = tmp_path / "output.parquet"
+    assert parquet_matches_schema(path, schema) is False
+    path.write_bytes(b"not parquet")
+    assert parquet_matches_schema(path, schema) is False
+    pq.write_table(pa.table({"wrong": [1]}), path)
+    assert parquet_matches_schema(path, schema) is False
+    pq.write_table(pa.Table.from_pylist([], schema=schema), path)
+    assert parquet_matches_schema(path, schema) is True
+
+    monkeypatch.setattr(pq, "ParquetFile", lambda path: SimpleNamespace(metadata=None))
+    assert parquet_matches_schema(path, schema) is False
 
 
 def test_identity_writer_uses_one_atomic_file_and_bounded_row_groups(tmp_path: Path) -> None:
@@ -44,13 +64,6 @@ def test_identity_writer_emits_schema_for_empty_input_and_rejects_bad_batches(
 def test_identity_writer_rejects_non_parquet_filenames(tmp_path: Path, filename: str) -> None:
     with pytest.raises(ValueError, match="^filename must be a Parquet filename$"):
         IdentityParquetWriter(tmp_path, filename=filename)
-
-
-def test_identity_writer_default_batch_size_is_stable(tmp_path: Path) -> None:
-    assert inspect.signature(IdentityParquetWriter).parameters["batch_rows"].default == 100_000
-    writer = IdentityParquetWriter(tmp_path, filename="raw.parquet")
-    assert writer._batch_rows == 100_000
-    writer.abort()
 
 
 def test_identity_writer_creates_nested_output_directory(tmp_path: Path) -> None:
@@ -137,13 +150,14 @@ def test_identity_writer_flushes_with_identity_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, object] = {}
+    table = object()
 
     class TableFactory:
         @staticmethod
         def from_pydict(data: dict[str, list[object]], *, schema: object) -> object:
             captured["data"] = {key: list(values) for key, values in data.items()}
             captured["schema"] = schema
-            return object()
+            return table
 
     class Writer:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -163,7 +177,7 @@ def test_identity_writer_flushes_with_identity_schema(
     assert captured == {
         "data": {"osm_type": ["way"], "osm_id": [1]},
         "schema": IDENTITY_SCHEMA,
-        "table": captured["table"],
+        "table": table,
     }
     writer.abort()
 

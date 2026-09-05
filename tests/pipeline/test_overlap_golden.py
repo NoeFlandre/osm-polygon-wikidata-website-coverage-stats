@@ -80,7 +80,7 @@ def test_golden_overlap_contract_and_resume(
         del args, kwargs
         raise AssertionError("a valid golden stage was recomputed")
 
-    monkeypatch.setattr(overlap_module, "_run_overlap_query", fail_if_recomputed)
+    monkeypatch.setattr(overlap_module, "_write_partitioned_overlap", fail_if_recomputed)
     second = compute_overlap(
         raw.parent,
         MembershipResult((website, wikidata)),

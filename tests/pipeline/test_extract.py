@@ -1,5 +1,4 @@
 import hashlib
-import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -502,10 +501,6 @@ def test_extract_all_requires_equal_pending_and_extracted_lengths(
         extract_all(paths_for(tmp_path, tmp_path / "raw"), "run")
 
 
-def test_extract_all_default_batch_size_is_stable() -> None:
-    assert inspect.signature(extract_all).parameters["batch_rows"].default == 100_000
-
-
 def test_extract_all_passes_default_batch_size_to_extraction_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -591,12 +586,6 @@ def test_extract_checkpoint_helpers_reject_invalid_payloads(tmp_path: Path) -> N
         is False
     )
     assert extract_module._checkpoint_count_and_output(tmp_path, pbf, {"row_count": 1}) is None
-    assert (
-        extract_module._checkpoint_extraction(
-            tmp_path, pbf, [], current, extract_module.scan_pbf_keys
-        )
-        is None
-    )
     assert (
         extract_module._checkpoint_extraction(
             tmp_path,

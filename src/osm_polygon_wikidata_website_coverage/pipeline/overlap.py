@@ -27,6 +27,7 @@ from osm_polygon_wikidata_website_coverage.io.parquet import (
     MEMBERSHIP_SCHEMA,
     OVERLAP_SCHEMA,
     SUMMARY_SCHEMA,
+    parquet_matches_schema,
 )
 from osm_polygon_wikidata_website_coverage.pipeline.join import MembershipResult
 from osm_polygon_wikidata_website_coverage.sources._files import file_inventory
@@ -80,9 +81,6 @@ class OverlapResult:
     summary: dict[str, int]
 
 
-_write_query = export_query
-
-
 def _identity_files(root: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         raise OverlapError(f"raw identity directory is missing: {root}")
@@ -112,10 +110,6 @@ def _validate_memberships(memberships: MembershipResult) -> tuple[Path, Path]:
     return website, wikidata
 
 
-def _inventory(paths: tuple[Path, ...], root: Path) -> list[dict[str, Any]]:
-    return file_inventory(root, paths)
-
-
 def _coverage_root(output_root: Path) -> Path:
     return output_root / "coverage"
 
@@ -130,26 +124,6 @@ def _summary_path(output_root: Path) -> Path:
 
 def _manifest_path(output_root: Path) -> Path:
     return _coverage_root(output_root) / "manifest.json"
-
-
-def _parquet_matches_schema(path: Path, schema: pa.Schema) -> bool:
-    try:
-        metadata = pq.ParquetFile(path).metadata
-        return metadata is not None and pq.read_schema(path) == schema
-    except (OSError, ValueError, pa.ArrowException):
-        return False
-
-
-def _output_is_valid(path: Path) -> bool:
-    return _parquet_matches_schema(path, OVERLAP_SCHEMA)
-
-
-def _summary_is_valid(path: Path) -> bool:
-    return _parquet_matches_schema(path, SUMMARY_SCHEMA)
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    return read_json_object(path)
 
 
 def _expected_shard_names() -> tuple[str, ...]:
@@ -177,7 +151,7 @@ def _stage_manifest_matches(
 
 
 def _all_shards_valid(outputs: tuple[Path, ...]) -> bool:
-    return all(_output_is_valid(path) for path in outputs)
+    return all(parquet_matches_schema(path, OVERLAP_SCHEMA) for path in outputs)
 
 
 def _stage_is_reusable(
@@ -185,14 +159,16 @@ def _stage_is_reusable(
     raw_inventory: list[dict[str, Any]],
     membership_inventory: list[dict[str, Any]],
 ) -> bool:
-    manifest = _read_json(_manifest_path(output_root))
+    manifest = read_json_object(_manifest_path(output_root))
     overlap_root = _overlap_root(output_root)
     outputs = _shard_outputs(overlap_root)
     if not _stage_manifest_matches(manifest, raw_inventory, membership_inventory):
         return False
     if tuple(path.name for path in outputs) != _expected_shard_names():
         return False
-    return _all_shards_valid(outputs) and _summary_is_valid(_summary_path(output_root))
+    return _all_shards_valid(outputs) and parquet_matches_schema(
+        _summary_path(output_root), SUMMARY_SCHEMA
+    )
 
 
 def _write_empty(path: Path) -> None:
@@ -200,10 +176,6 @@ def _write_empty(path: Path) -> None:
         pq.write_table(
             pa.Table.from_pylist([], schema=OVERLAP_SCHEMA), temporary, compression="zstd"
         )
-
-
-def _scratch_root(output_root: Path) -> Path:
-    return output_root / "scratch"
 
 
 def _load_membership_tables(
@@ -214,14 +186,6 @@ def _load_membership_tables(
             f"CREATE TEMP TABLE {name} AS SELECT DISTINCT osm_type, osm_id FROM read_parquet(?)",
             [str(path)],
         )
-
-
-def _partition_directory(output_root: Path) -> Path:
-    return _scratch_root(output_root) / "overlap-parts.tmp"
-
-
-def _temporary_overlap_root(output_root: Path) -> Path:
-    return _coverage_root(output_root) / ".overlap.tmp"
 
 
 def _write_raw_partitions(
@@ -242,7 +206,7 @@ def _write_shard(connection: duckdb.DuckDBPyConnection, bucket: Path, output: Pa
     if not files:
         _write_empty(output)
         return
-    _write_query(
+    export_query(
         connection,
         _SHARD_QUERY,
         [str(bucket / "*.parquet")],
@@ -262,8 +226,8 @@ def _write_partitioned_overlap(
     raw_root: Path,
     output_root: Path,
 ) -> tuple[Path, ...]:
-    partitions = _partition_directory(output_root)
-    temporary_root = _temporary_overlap_root(output_root)
+    partitions = output_root / "scratch" / "overlap-parts.tmp"
+    temporary_root = _coverage_root(output_root) / ".overlap.tmp"
     shutil.rmtree(partitions, ignore_errors=True)
     shutil.rmtree(temporary_root, ignore_errors=True)
     partitions.mkdir(parents=True, exist_ok=True)
@@ -349,25 +313,10 @@ def _write_manifest(
 
 
 def _existing_result(output_root: Path) -> OverlapResult:
-    paths = tuple(
-        _overlap_root(output_root) / f"shard-{index:02d}.parquet"
-        for index in range(OVERLAP_SHARD_COUNT)
-    )
+    paths = tuple(_overlap_root(output_root) / name for name in _expected_shard_names())
     rows = pq.read_table(_summary_path(output_root)).to_pylist()
     summary = {str(row["overlap_category"]): int(row["count"]) for row in rows}
     return OverlapResult(paths, _summary_path(output_root), sum(summary.values()), summary)
-
-
-def _cleanup_scratch(output_root: Path) -> None:
-    shutil.rmtree(_scratch_root(output_root), ignore_errors=True)
-
-
-def _run_overlap_query(
-    connection: duckdb.DuckDBPyConnection, raw_root: Path, output_root: Path
-) -> tuple[Path, ...]:
-    """Partition first, then deduplicate each shard and atomically promote it."""
-
-    return _write_partitioned_overlap(connection, raw_root, output_root)
 
 
 def compute_overlap(
@@ -381,8 +330,8 @@ def compute_overlap(
 
     raw_files = _identity_files(raw_identity_root)
     membership_paths = _validate_memberships(memberships)
-    raw_inventory = _inventory(raw_files, raw_identity_root)
-    membership_inventory = _inventory(membership_paths, membership_paths[0].parent)
+    raw_inventory = file_inventory(raw_identity_root, raw_files)
+    membership_inventory = file_inventory(membership_paths[0].parent, membership_paths)
     if resume and _stage_is_reusable(output_root, raw_inventory, membership_inventory):
         return _existing_result(output_root)
     overlap_root = _overlap_root(output_root)
@@ -393,7 +342,7 @@ def compute_overlap(
     try:
         configure_connection(connection, output_root)
         _load_membership_tables(connection, membership_paths)
-        paths = _run_overlap_query(connection, raw_identity_root, output_root)
+        paths = _write_partitioned_overlap(connection, raw_identity_root, output_root)
         summary_rows, summary = _summary_rows(connection, _overlap_root(output_root))
         summary_path = _write_summary(output_root, summary_rows)
         row_count = sum(summary.values())
@@ -403,4 +352,4 @@ def compute_overlap(
         try:
             connection.close()
         finally:
-            _cleanup_scratch(output_root)
+            shutil.rmtree(output_root / "scratch", ignore_errors=True)

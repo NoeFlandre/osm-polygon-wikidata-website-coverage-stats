@@ -18,6 +18,7 @@ from osm_polygon_wikidata_website_coverage.domain.identity import OsmIdentity
 from osm_polygon_wikidata_website_coverage.io.atomic import read_json_object, write_json
 from osm_polygon_wikidata_website_coverage.io.parquet import IDENTITY_SCHEMA, IdentityParquetWriter
 from osm_polygon_wikidata_website_coverage.io.pbf import scan_pbf_keys
+from osm_polygon_wikidata_website_coverage.sources._files import _regular_file_under
 
 Scanner = Callable[[Path, Callable[[OsmIdentity], None]], None]
 MAX_WORKERS = 8
@@ -99,14 +100,6 @@ def scanner_mode(scanner: Scanner) -> str:
     """Return the checkpoint mode for a scanner."""
 
     return COVERAGE_ONLY_SCANNER_MODE if scanner is scan_pbf_keys else CUSTOM_SCANNER_MODE
-
-
-def _regular_file_under(path: Path, root: Path) -> bool:
-    try:
-        physical_path = path.resolve()
-    except (OSError, RuntimeError):
-        return False
-    return physical_path.is_file() and (physical_path == root or root in physical_path.parents)
 
 
 def regular_pbf_files(raw_root: Path) -> tuple[Path, ...]:
@@ -260,12 +253,10 @@ def _checkpoint_count_and_output(
 def _checkpoint_extraction(
     run_root: Path,
     pbf_path: Path,
-    payload: Any,
+    payload: dict[str, Any],
     current: SourceSnapshot,
     scanner: Scanner,
 ) -> _SourceExtraction | None:
-    if not isinstance(payload, dict):
-        return None
     if not _checkpoint_source_matches(payload, pbf_path, current, scanner):
         return None
     count = _checkpoint_count_and_output(run_root, pbf_path, payload)

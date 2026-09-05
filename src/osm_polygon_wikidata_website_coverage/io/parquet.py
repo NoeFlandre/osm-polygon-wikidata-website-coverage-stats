@@ -30,6 +30,16 @@ SUMMARY_SCHEMA = pa.schema(
 )
 
 
+def parquet_matches_schema(path: Path, schema: pa.Schema) -> bool:
+    """Check whether a reusable Parquet output has readable metadata and its schema."""
+
+    try:
+        metadata = pq.ParquetFile(path).metadata
+        return metadata is not None and pq.read_schema(path) == schema
+    except (OSError, ValueError, pa.ArrowException):
+        return False
+
+
 class IdentityParquetWriter:
     """Write one atomic identity Parquet with bounded row groups."""
 
@@ -44,7 +54,6 @@ class IdentityParquetWriter:
             raise ValueError("batch_rows must be positive")
         if not filename or Path(filename).name != filename or not filename.endswith(".parquet"):
             raise ValueError("filename must be a Parquet filename")
-        self._directory = directory
         self._final = directory / filename
         self._temporary = directory / f".{filename}.tmp"
         self._batch_rows = batch_rows
@@ -52,7 +61,7 @@ class IdentityParquetWriter:
         self._osm_ids: list[int] = []
         self._writer: pq.ParquetWriter | None = None
         self._closed = False
-        self._directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
         self._refuse_overwrite()
 
     def write(self, identity: OsmIdentity) -> None:

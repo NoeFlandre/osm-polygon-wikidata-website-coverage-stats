@@ -20,10 +20,12 @@ def file_inventory(
 
     inventory: list[dict[str, Any]] = []
     for path in files:
+        relative_path = str(path.relative_to(root))
+        stat = path.stat()
         record: dict[str, Any] = {
-            "path": str(path.relative_to(root)),
-            "size_bytes": path.stat().st_size,
-            "mtime_ns": path.stat().st_mtime_ns,
+            "path": relative_path,
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
         }
         if label is not None:
             record = {"label": label, **record}

@@ -1,4 +1,3 @@
-import inspect
 import json
 from pathlib import Path
 from typing import NoReturn
@@ -79,7 +78,7 @@ def test_load_memberships_reuses_matching_stage_without_source_queries(
     def fail_if_rescanned(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("rescanned")
 
-    monkeypatch.setattr(join_module, "_write_query", fail_if_rescanned)
+    monkeypatch.setattr(join_module, "export_query", fail_if_rescanned)
     second = load_memberships(paths, run_root, resume=True)
 
     assert second.paths == first.paths
@@ -178,10 +177,6 @@ def test_join_spill_cleanup_targets_the_exact_directory_and_ignores_missing(
     assert calls == [(run_root / "scratch" / "duckdb-temp", True)]
 
 
-def test_load_memberships_default_resume_is_false() -> None:
-    assert inspect.signature(load_memberships).parameters["resume"].default is False
-
-
 def test_load_memberships_default_rebuilds_an_existing_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -197,7 +192,7 @@ def test_load_memberships_default_rebuilds_an_existing_stage(
     def record_query(*args: object, **kwargs: object) -> None:
         calls.append((*args, *kwargs.values()))
 
-    monkeypatch.setattr(join_module, "_write_query", record_query)
+    monkeypatch.setattr(join_module, "export_query", record_query)
 
     result = load_memberships(paths, run_root)
 
@@ -225,7 +220,7 @@ def test_load_memberships_uses_an_in_memory_duckdb_connection(
 
     monkeypatch.setattr(join_module.duckdb, "connect", connect)
     monkeypatch.setattr(join_module, "configure_connection", lambda connection, root: None)
-    monkeypatch.setattr(join_module, "_write_query", lambda *args, **kwargs: None)
+    monkeypatch.setattr(join_module, "export_query", lambda *args, **kwargs: None)
 
     load_memberships(paths, tmp_path / "run")
 

@@ -28,12 +28,6 @@ def _overlaps(first: Path, second: Path) -> bool:
     return _is_within(first, second) or _is_within(second, first)
 
 
-def _source_roots(
-    raw_pbf_root: Path | str, wikidata_root: Path | str, website_root: Path | str
-) -> tuple[Path, ...]:
-    return tuple(_absolute(path) for path in (raw_pbf_root, wikidata_root, website_root))
-
-
 def _validate_source_root(output_root: Path, source_root: Path) -> None:
     output_root = _absolute(output_root)
     source_root = _absolute(source_root)
@@ -71,7 +65,9 @@ class DataPaths:
         if not _is_within(output_root, _absolute(DEFAULT_PROJECTS_ROOT)):
             raise ValueError("data root must be under the Seagate projects volume")
 
-        source_roots = _source_roots(raw_pbf_root, wikidata_root, website_root)
+        source_roots = tuple(
+            _absolute(path) for path in (raw_pbf_root, wikidata_root, website_root)
+        )
         for source_root in source_roots:
             _validate_source_root(output_root, source_root)
 

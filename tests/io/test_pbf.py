@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, cast
 
+import osmium.osm.mutable
 import pytest
 
 import osm_polygon_wikidata_website_coverage.io.pbf as pbf_module
@@ -174,53 +175,50 @@ def test_handler_ignores_missing_way_id_and_relation_tags() -> None:
     assert results == []
 
 
-def test_build_handler_uses_the_default_and_custom_factories() -> None:
-    def callback(identity: OsmIdentity) -> None:
-        del identity
+def test_scan_pbf_keys_reads_polygons_without_node_locations(tmp_path: Path) -> None:
+    pbf = tmp_path / "fixture.osm.pbf"
+    with osmium.SimpleWriter(pbf) as writer:
+        writer.add_way(osmium.osm.mutable.Way(id=11, nodes=[1, 2, 3, 1]))
+        writer.add_way(osmium.osm.mutable.Way(id=12, nodes=[1, 2, 3]))
+        writer.add_relation(osmium.osm.mutable.Relation(id=22, tags={"type": "multipolygon"}))
+        writer.add_relation(osmium.osm.mutable.Relation(id=23, tags={"type": "route"}))
+    results: list[OsmIdentity] = []
 
-    default = pbf_module._build_coverage_handler(callback, None)
-    assert isinstance(default, pbf_module._CoverageHandler)
+    scan_pbf_keys(pbf, results.append)
 
-    class CustomHandler:
-        def __init__(self, *, callback: object) -> None:
-            self.callback = callback
-
-    custom = pbf_module._build_coverage_handler(callback, CustomHandler)
-    assert isinstance(custom, CustomHandler)
-    assert custom.callback is callback
+    assert results == [OsmIdentity("way", 11), OsmIdentity("relation", 22)]
 
 
-def test_scan_pbf_keys_uses_locations_false_and_validates_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_scan_pbf_keys_uses_locations_false_and_validates_paths(tmp_path: Path) -> None:
     pbf = tmp_path / "fixture.osm.pbf"
     pbf.write_bytes(b"fixture")
     calls: list[tuple[str, bool]] = []
+    results: list[OsmIdentity] = []
 
     class Handler:
-        def __init__(self, *, callback: object) -> None:
+        def __init__(self, *, callback: pbf_module.ResultCallback) -> None:
             self.callback = callback
 
         def apply_file(self, filename: str, *, locations: bool) -> None:
-            assert self.callback is not None
             calls.append((filename, locations))
+            self.callback(OsmIdentity("way", 11))
 
-    scan_pbf_keys(pbf, lambda _: None, handler_factory=Handler)
+    scan_pbf_keys(pbf, results.append, handler_factory=Handler)
 
     assert calls == [(str(pbf), False)]
+    assert results == [OsmIdentity("way", 11)]
     with pytest.raises(PBFReadError, match="does not exist"):
         scan_pbf_keys(tmp_path / "missing.osm.pbf", lambda _: None)
     directory = tmp_path / "directory.osm.pbf"
     directory.mkdir()
     with pytest.raises(PBFReadError, match="not a file"):
         scan_pbf_keys(directory, lambda _: None)
-    monkeypatch.setattr(
-        pbf_module,
-        "_build_coverage_handler",
-        lambda *args: (_ for _ in ()).throw(OSError("bad")),
-    )
+
+    def broken_factory(*, callback: pbf_module.ResultCallback) -> None:
+        raise OSError("bad")
+
     with pytest.raises(PBFReadError, match="Failed to read PBF"):
-        scan_pbf_keys(pbf, lambda _: None)
+        scan_pbf_keys(pbf, results.append, handler_factory=broken_factory)
 
 
 def test_scan_pbf_keys_wraps_reader_errors(tmp_path: Path) -> None:

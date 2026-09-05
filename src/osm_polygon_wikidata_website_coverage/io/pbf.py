@@ -101,13 +101,6 @@ def _validate_pbf_path(pbf_path: str | Path) -> Path:
     return path
 
 
-def _build_coverage_handler(
-    callback: ResultCallback, handler_factory: HandlerFactory | None
-) -> Any:
-    handler_type = _CoverageHandler if handler_factory is None else handler_factory
-    return handler_type(callback=callback)
-
-
 def scan_pbf_keys(
     pbf_path: str | Path,
     callback: ResultCallback,
@@ -118,7 +111,8 @@ def scan_pbf_keys(
 
     path = _validate_pbf_path(pbf_path)
     try:
-        handler = _build_coverage_handler(callback, handler_factory)
+        handler_type = _CoverageHandler if handler_factory is None else handler_factory
+        handler = handler_type(callback=callback)
         handler.apply_file(str(path), locations=False)
     except PBFReadError:
         raise
